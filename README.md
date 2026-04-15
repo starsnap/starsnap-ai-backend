@@ -35,10 +35,38 @@ starsnap-ai-backend/
 - 별도 `images` 테이블 저장은 사용하지 않음
 - 기존 `image.py`, `person.py` 모델은 `app/models/legacy/`로 이동
 
+## JWT 인증/인가
+
+- `POST /api/enroll`는 JWT 인증이 필요합니다.
+- `POST /api/enroll`는 `ADMIN` 권한만 허용합니다.
+- 요청 헤더는 반드시 `Authorization: Bearer <access_token>` 형식이어야 합니다.
+
+토큰 검증 규칙:
+- 알고리즘: `HS256`
+- JWT 헤더: `JWT=access` (현재 서버 정책상 `typ`는 허용하지 않음)
+- Payload 필드:
+  - `jti`: 사용자 식별자
+  - `authority`: 권한 (`ADMIN`, `USER`, `STAR`)
+
+권한 정책:
+- `authority=ADMIN`: `/api/enroll` 접근 가능
+- `authority=USER` 또는 `authority=STAR`: `403 Admin only`
+
+주요 인증 에러:
+- `401 Authorization header missing or invalid`: Bearer 헤더 누락/형식 오류
+- `401 Invalid token type: JWT=...`: Access 토큰 타입 불일치
+- `401 Invalid token`: 서명 오류/토큰 형식 오류
+- `401 Token expired`: 만료 토큰
+- `403 Admin only`: 인증은 성공했지만 권한 부족
+
 ## API
 
 ### `POST /api/enroll`
 이미지를 업로드해 `star.face_image_vector`를 갱신합니다.
+
+접근 제어:
+- 인증 필요 (`Authorization: Bearer <access_token>`)
+- `ADMIN` 권한 필요
 
 요청 form-data:
 - `file` (required): 이미지 파일
@@ -50,6 +78,13 @@ starsnap-ai-backend/
   "status": "ok",
   "star_id": "star_001",
   "embedding_dim": 512
+}
+```
+
+권한 부족 응답 예시:
+```json
+{
+  "error": "Admin only"
 }
 ```
 
@@ -85,7 +120,7 @@ Postman 설정:
   - key: `file` (type: File)
   - value: 업로드할 이미지 파일 선택
 
-응답 예시 (기본 임계값 0.40 이상일 때):
+응답 예시 (기본 임계값 0.45 이상일 때):
 ```json
 {
   "status": "ok",
@@ -106,12 +141,12 @@ Postman 설정:
 }
 ```
 
-응답 예시 (기본 임계값 0.40 미만일 때):
+응답 예시 (기본 임계값 0.45 미만일 때):
 ```json
 {
   "status": "ok",
   "threshold": {
-    "min_similarity": 0.4,
+    "min_similarity": 0.45,
     "passed": false
   },
   "query": {
@@ -147,24 +182,29 @@ Postman 설정:
 
 ## 빠른 테스트 플로우
 
-1) 임베딩 등록
+1) starsnap-backend에서 Access Token 발급
+
+2) 임베딩 등록
 - `POST /api/enroll`
+- Header: `Authorization: Bearer <access_token>`
 - form-data: `file`, `star_id`
 
-2) 유사도 검색
+3) 유사도 검색
 - `POST /api/match/star`
 - form-data: `file`
 
 ## 환경 변수
 
-`config.py` 기준 기본값:
+`config.py` 기준 필수 키:
 
 ```env
-DB_USER=postgres
+DB_USER=starsnap
 DB_PASSWORD=
-DB_HOST=localhost
+DB_HOST=127.0.0.1
 DB_PORT=5432
 DB_NAME=starsnap
+DB_SCHEME=starsnap
+DEBUG=true
 
 # ArcFace (InsightFace) 실행 옵션
 ARCFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
@@ -172,7 +212,10 @@ ARCFACE_MODEL_NAME=buffalo_l
 ARCFACE_DET_SIZE=640
 
 # /api/match/star 최소 유사도 임계값
-MATCH_MIN_SIMILARITY=0.40
+MATCH_MIN_SIMILARITY=0.45
+
+# JWT Access Token 검증 시크릿 (starsnap-backend와 동일해야 함)
+JWT_ACCESS_SECRET=
 ```
 
 `ARCFACE_PROVIDERS` 기본값은 GPU 우선 + CPU 폴백입니다.
