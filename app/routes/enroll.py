@@ -4,6 +4,7 @@
 from flask import Blueprint, request, jsonify, send_file
 import io
 from app.services import EmbeddingService
+from app.utils.jwt_utils import require_jwt, require_admin
 from config import Config
 
 # 블루프린트 생성
@@ -19,6 +20,8 @@ embedding_service = EmbeddingService(
 
 
 @enroll_bp.route("/enroll", methods=["POST"])
+@require_jwt
+@require_admin
 def enroll():
     """
     이미지 업로드 후 star.face_image_vector에 임베딩 저장

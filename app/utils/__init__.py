@@ -10,6 +10,7 @@ from .image_utils import (
     encode_image_to_base64,
     encode_image_to_bytes,
 )
+from .jwt_utils import require_jwt, require_admin, require_user_or_admin, get_current_user
 
 __all__ = [
     'vec_to_bytes',
@@ -21,5 +22,9 @@ __all__ = [
     'get_image_dimensions',
     'crop_image_by_bbox',
     'encode_image_to_base64',
-    'encode_image_to_bytes'
+    'encode_image_to_bytes',
+    'require_jwt',
+    'require_admin',
+    'require_user_or_admin',
+    'get_current_user',
 ]
