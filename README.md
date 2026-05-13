@@ -64,21 +64,59 @@ starsnap-ai-backend/
 ### `POST /api/enroll`
 이미지를 업로드해 `star.face_image_vector`를 갱신합니다.
 
+또한 `PHOTO_API_URL`이 `starsnap-backend`를 가리키면 presign 발급 + presigned URL 업로드 흐름을 함께 수행합니다.
+
 접근 제어:
 - 인증 필요 (`Authorization: Bearer <access_token>`)
 - `ADMIN` 권한 필요
 
 요청 form-data:
-- `file` (required): 이미지 파일
 - `star_id` (required): 스타 ID
+- `file` (optional): 이미지 파일
+- `aiState` (optional): 업로드 메타데이터
+- `dateTaken` (optional): 업로드 메타데이터
+- `source` (optional): 업로드 메타데이터
 
-응답 예시:
+동작:
+- `file`가 있으면 얼굴 임베딩을 추출해 `star.face_image_vector`에 저장합니다.
+- `file`가 없으면(또는 presign 전용 사용 시) 업스트림 presign 응답을 반환할 수 있습니다.
+
+응답 예시(파일 업로드 + 임베딩 저장 성공):
 ```json
 {
   "status": "ok",
   "star_id": "star_001",
   "embedding_dim": 512
 }
+```
+
+응답 예시(presign 응답 전달):
+```json
+{
+  "presignedUrl": "https://...",
+  "requiredHeaders": {
+    "x-amz-meta-ai-state": "false",
+    "x-amz-meta-date-taken": "2026-05-13",
+    "x-amz-meta-source": "internet"
+  }
+}
+```
+
+### Presigned URL 업로드 규칙
+
+- `presignedUrl`로 업로드할 때는 `PUT` + raw body 업로드를 사용합니다.
+- `FormData`(`-F`)를 사용하지 않습니다.
+- 메타데이터(`aiState`, `dateTaken`, `source`)는 `x-amz-meta-*` 헤더로 전송해야 합니다.
+- `requiredHeaders`가 있으면 반드시 그대로 포함해야 합니다.
+
+`curl` 예시:
+
+```bash
+curl -X PUT "<presignedUrl>" \
+  -H "x-amz-meta-ai-state:false" \
+  -H "x-amz-meta-date-taken:2026-05-13" \
+  -H "x-amz-meta-source:internet" \
+  --upload-file "/path/to/sample.jpg"
 ```
 
 권한 부족 응답 예시:
@@ -184,10 +222,10 @@ Postman 설정:
 
 1) starsnap-backend에서 Access Token 발급
 
-2) 임베딩 등록
+2) 임베딩 등록 / presign 처리
 - `POST /api/enroll`
 - Header: `Authorization: Bearer <access_token>`
-- form-data: `file`, `star_id`
+- form-data: `star_id`, (`file` 선택), (`aiState`, `dateTaken`, `source` 선택)
 
 3) 유사도 검색
 - `POST /api/match/star`
@@ -242,7 +280,22 @@ python app.py
 
 ## Docker 실행
 
+### GPU 모드
+
 ```bash
 docker build -t starsnap-ai-backend -f dockerfile .
-docker run --rm -p 8000:8000 --env-file .env starsnap-ai-backend
+docker run --rm --gpus all -p 8000:8000 --env-file .env starsnap-ai-backend
 ```
+
+실행 후 로그에서 아래처럼 provider 적용 상태를 확인하세요.
+- 기대값: `Applied providers: ['CUDAExecutionProvider', ...]`
+- CPU만 보이면 GPU 라이브러리를 로드하지 못한 상태입니다.
+
+컨테이너 내부에서 빠른 확인:
+
+```bash
+python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+```
+
+결과에 `CUDAExecutionProvider`가 포함되어야 합니다.
+
