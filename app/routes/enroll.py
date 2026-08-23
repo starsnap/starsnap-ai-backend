@@ -7,7 +7,7 @@ import logging
 from app.utils.http_forward import forward_multipart_request, build_multipart_payload, forward_request
 import json
 from app.services import EmbeddingService
-from app.utils.jwt_utils import require_jwt, require_admin
+from app.utils.jwt_utils import ACCESS_TOKEN_COOKIE_NAME, require_jwt, require_admin
 from config import Config
 from app.utils.access_log_sender import send_access_log
 from datetime import datetime, timezone
@@ -28,6 +28,17 @@ embedding_service = EmbeddingService(
     det_size=(Config.ARCFACE_DET_SIZE, Config.ARCFACE_DET_SIZE),
     default_min_similarity=Config.MATCH_MIN_SIMILARITY,
 )
+
+
+def _uses_presigned_upload_api(url: str) -> bool:
+    """Whether PHOTO_API_URL targets the main backend presign endpoint."""
+    try:
+        parsed = urlparse(url)
+    except (TypeError, ValueError):
+        return False
+
+    normalized_path = "/" + parsed.path.strip("/")
+    return bool(parsed.scheme and parsed.netloc) and normalized_path.endswith("/api/file/photo")
 
 
 @enroll_bp.route("/enroll", methods=["POST"])
@@ -87,19 +98,24 @@ def enroll():
             else:
                 metadata_fields[key] = value
 
-    auth_header = request.headers.get("Authorization", "")
-    is_starsnap_backend = "starsnap-backend" in Config.PHOTO_API_URL
+    access_token = getattr(g, "access_token", "")
+    forwarded_cookie = (
+        f"{ACCESS_TOKEN_COOKIE_NAME}={access_token}"
+        if isinstance(access_token, str) and access_token
+        else None
+    )
+    uses_presigned_upload_api = _uses_presigned_upload_api(Config.PHOTO_API_URL)
     logger.info("[timing] step1 input_parse=%.0fms star_id=%s file_present=%s metadata_keys=%s",
                 (time.monotonic() - t_parse) * 1000, star_id, file is not None, list(metadata_fields.keys()))
 
     # ── 2. presign 요청을 백그라운드 스레드에 제출 (파일이 있을 때만 병렬화 의미 있음)
     #       파일이 없는 경우에도 동일 스레드로 처리하되 메인 스레드가 블로킹됨.
     presign_future = None
-    if is_starsnap_backend:
+    if uses_presigned_upload_api:
         _json_body = json.dumps(metadata_fields or {}).encode("utf-8")
         _hdrs = {"Content-Type": "application/json"}
-        if auth_header:
-            _hdrs["Authorization"] = auth_header
+        if forwarded_cookie:
+            _hdrs["Cookie"] = forwarded_cookie
 
         # 클로저 캡처용 지역 변수 복사
         _presign_url = Config.PHOTO_API_URL
@@ -212,7 +228,7 @@ def enroll():
         return jsonify(presign_error or {"error": "no file provided"}), presign_status or 400
 
     # ── 6. starsnap-backend 흐름: presignedUrl로 PUT 업로드 ──────────────────
-    if is_starsnap_backend:
+    if uses_presigned_upload_api:
         t_photo = time.monotonic()
         if not isinstance(presign_result, dict) or not presign_result.get("presignedUrl"):
             logger.error(
@@ -364,7 +380,7 @@ def enroll():
             url=Config.PHOTO_API_URL,
             multipart_body=multipart_body,
             boundary=boundary,
-            headers={"Authorization": auth_header} if auth_header else None,
+            headers={"Cookie": forwarded_cookie} if forwarded_cookie else None,
             timeout=Config.PHOTO_API_TIMEOUT_SECONDS,
             error_prefix="photo",
         )
@@ -540,5 +556,4 @@ def test_face_vector():
         "height": info["height"],
         "max_dim": int(max_dim) if max_dim is not None else None,
     }), 200
-
 

@@ -17,6 +17,9 @@ from flask import request, jsonify, g
 from config import Config
 
 
+ACCESS_TOKEN_COOKIE_NAME = "access-token"
+
+
 def _decode_access_token(token: str) -> dict:
     """
     Access Token 디코드 & 검증.
@@ -64,7 +67,7 @@ def require_jwt(f):
     """
     JWT Access Token 검증 데코레이터.
 
-    Authorization: Bearer <token> 헤더를 검증하고,
+    HttpOnly access-token 쿠키를 검증하고,
     성공 시 g.user_id / g.authority 에 사용자 정보를 저장한다.
 
     Usage:
@@ -76,12 +79,9 @@ def require_jwt(f):
     """
     @wraps(f)
     def decorated(*args, **kwargs):
-        auth_header = request.headers.get("Authorization", "")
-
-        if not auth_header.startswith("Bearer "):
-            return jsonify({"error": "Authorization header missing or invalid"}), 401
-
-        token = auth_header[len("Bearer "):]
+        token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME, "").strip()
+        if not token:
+            return jsonify({"error": "Access token cookie missing or invalid"}), 401
 
         try:
             payload = _decode_access_token(token)
@@ -95,6 +95,8 @@ def require_jwt(f):
         # Flask g 에 사용자 정보 저장
         g.user_id = payload.get("jti")        # Spring에서 setId(uuid)
         g.authority = payload.get("authority") # Spring에서 claim(AUTHORITY, authority)
+        # 업스트림에는 검증을 통과한 access-token 쿠키만 전달한다.
+        g.access_token = token
 
         return f(*args, **kwargs)
 

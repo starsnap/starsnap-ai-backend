@@ -72,7 +72,7 @@ starsnap-ai-backend/
 
 - `POST /api/enroll`는 JWT 인증이 필요합니다.
 - `POST /api/enroll`는 `ADMIN` 권한만 허용합니다.
-- 요청 헤더는 반드시 `Authorization: Bearer <access_token>` 형식이어야 합니다.
+- 로그인 시 발급된 HttpOnly `access-token` 쿠키가 필요하며, Bearer 헤더는 인증에 사용하지 않습니다.
 
 토큰 검증 규칙:
 - 알고리즘: `HS256`
@@ -86,7 +86,7 @@ starsnap-ai-backend/
 - `authority=USER` 또는 `authority=STAR`: `403 Admin only`
 
 주요 인증 에러:
-- `401 Authorization header missing or invalid`: Bearer 헤더 누락/형식 오류
+- `401 Access token cookie missing or invalid`: `access-token` 쿠키 누락/형식 오류
 - `401 Invalid token type: JWT=...`: Access 토큰 타입 불일치
 - `401 Invalid token`: 서명 오류/토큰 형식 오류
 - `401 Token expired`: 만료 토큰
@@ -97,10 +97,10 @@ starsnap-ai-backend/
 ### `POST /api/enroll`
 이미지를 업로드해 `star.face_image_vector`를 갱신합니다.
 
-또한 `PHOTO_API_URL`이 `starsnap-backend`를 가리키면 presign 발급 + presigned URL 업로드 흐름을 함께 수행합니다.
+또한 `PHOTO_API_URL`의 path가 `/api/file/photo`로 끝나면 hostname과 관계없이 presign 발급 + presigned URL 업로드 흐름을 함께 수행합니다.
 
 접근 제어:
-- 인증 필요 (`Authorization: Bearer <access_token>`)
+- 인증 필요 (HttpOnly `access-token` 쿠키)
 - `ADMIN` 권한 필요
 
 요청 form-data:
@@ -285,7 +285,7 @@ Postman 설정:
 
 2) 임베딩 등록 / presign 처리
 - `POST /api/enroll`
-- Header: `Authorization: Bearer <access_token>`
+- Cookie: `access-token=<access_token>` (로그인된 클라이언트에서는 자동 첨부)
 - form-data: `star_id`, (`file` 선택), (`aiState`, `dateTaken`, `source` 선택)
 
 3) 유사도 검색

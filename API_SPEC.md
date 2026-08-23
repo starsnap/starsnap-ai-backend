@@ -1,7 +1,7 @@
 # StarSnap AI 백엔드 API 명세
 
-> 서버 루트: `starsnap-main/starsnap-ai-backend`  
-> Server origin: `http://localhost:8000`  
+> 서버 루트: `starsnap-main/starsnap-ai-backend`
+> Server origin: `http://localhost:8000`
 > 엔드포인트: 6개
 
 ## 1. 공통 규칙
@@ -12,7 +12,7 @@
 | Blueprint prefix | `/api` |
 | 기본 응답 | 명시적 API 응답은 JSON. 얼굴 crop API만 JPEG binary |
 | CORS | 앱 설정과 `flask-cors` 의존성이 없어 미지원 |
-| 인증 | `/enroll`만 Bearer JWT + `ADMIN`; 나머지는 공개 |
+| 인증 | `/enroll`만 HttpOnly `access-token` 쿠키 JWT + `ADMIN`; 나머지는 공개 |
 | DB | 메인 PostgreSQL의 `star` table과 `vector(512)` column 공유 |
 | 자동 method | Flask가 `OPTIONS`, GET route에는 `HEAD`도 제공하지만 아래에는 업무 method만 기재 |
 
@@ -25,7 +25,7 @@
 | 구분 | Method | Path | 인증 | 성공 |
 |---|---|---|---|---|
 | 운영 | `GET` | `/api/health` | 공개 | `200 {"status":"ok"}` |
-| 운영 | `POST` | `/api/enroll` | Bearer JWT + `ADMIN` | `201` 또는 upstream status |
+| 운영 | `POST` | `/api/enroll` | HttpOnly `access-token` 쿠키 + `ADMIN` | `201` 또는 upstream status |
 | 디버그 | `GET` | `/api/embedding/star/{star_id}` | 공개 | `200` |
 | 운영 | `POST` | `/api/match/star` | 공개 | `200` |
 | 테스트 | `POST` | `/api/test/largest-face` | 공개 | `200 image/jpeg` |
@@ -33,10 +33,10 @@
 
 ## 3. 인증
 
-`POST /api/enroll`만 다음 header가 필요하다.
+`POST /api/enroll`만 로그인 시 발급된 다음 HttpOnly 쿠키가 필요하다. `Authorization` Bearer 헤더는 인증에 사용하지 않는다.
 
 ```http
-Authorization: Bearer <access-token>
+Cookie: access-token=<access-token>
 ```
 
 - 서명 algorithm: `HS256`.
@@ -48,7 +48,7 @@ Authorization: Bearer <access-token>
 
 | HTTP | 응답 |
 |---|---|
-| `401` | `{"error":"Authorization header missing or invalid"}` |
+| `401` | `{"error":"Access token cookie missing or invalid"}` |
 | `401` | `{"error":"Token expired"}` |
 | `401` | `{"error":"Invalid token"}` |
 | `401` | `{"error":"Invalid token type: JWT=<value>"}` |
@@ -84,7 +84,7 @@ Request: 파일을 보내면 `multipart/form-data`. 파일 없는 presign-only �
 | `dateTaken` | string | 아니요 | 형식 검증 없음 |
 | `source` | string | 아니요 | 형식 검증 없음 |
 
-`file` 생략은 `PHOTO_API_URL`이 `starsnap-backend`를 포함해 presign 흐름을 사용할 때만 코드상 허용된다. 그 외에는 `400 no file provided`다.
+`file` 생략은 `PHOTO_API_URL`의 정규화된 path가 `/api/file/photo`로 끝나 presign 흐름을 사용할 때만 코드상 허용된다. hostname은 판별에 사용하지 않으며, 그 외에는 `400 no file provided`다.
 
 일반 성공:
 
@@ -247,7 +247,7 @@ Request: `multipart/form-data`
 - `ARCFACE_MAX_IMAGE_DIM=1280`.
 - `ACCESS_LOG_ENABLED=true`.
 - `ACCESS_LOG_SERVICE_NAME=starsnap-ai-backend`.
-- 코드의 기본 `ACCESS_LOG_URL`은 `http://host.docker.internal:7070/api/server-logs`인데 현재 Hub server port `8081`과 불일치한다.
+- 코드의 기본 `ACCESS_LOG_URL`은 Hub server port `8081`의 `http://host.docker.internal:8081/api/server-logs`다.
 
 `PHOTO_API_URL`과 timeout은 환경변수가 없으면 `services.yaml` 값을 사용할 수 있다. `DB_SCHEME`은 필수로 읽지만 실제 URI는 `postgresql://`로 고정되는 구현 불일치가 있다. 앱 시작 시 `db.create_all()`도 시도한다.
 
