@@ -556,4 +556,3 @@ def test_face_vector():
         "height": info["height"],
         "max_dim": int(max_dim) if max_dim is not None else None,
     }), 200
-
