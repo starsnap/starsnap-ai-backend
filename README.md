@@ -2,6 +2,39 @@
 
 Flask 기반 얼굴 임베딩 백엔드입니다. 업로드한 이미지에서 얼굴 임베딩을 추출하고 `star.face_image_vector`에 저장합니다.
 
+## 언어와 기술 스택
+
+버전은 `requirements.txt`와 `dockerfile`의 현재 설정을 기준으로 합니다. Python minor 버전은 별도로 고정하지 않고 Ubuntu 22.04의 `python3` 패키지를 사용합니다.
+
+| 구분 | 기술 | 설정 버전 |
+|---|---|---:|
+| 언어 | Python 3 | minor 미고정 |
+| API | Flask / Flask-SQLAlchemy | 3.1.2 / 3.1.1 |
+| 얼굴 모델 | InsightFace | 0.7.3 |
+| 추론 | ONNX Runtime GPU | 1.23.2 |
+| 영상 처리 | OpenCV headless | 4.12.0.88 |
+| 수치 처리 | NumPy | 2.2.6 |
+| 영속성 | SQLAlchemy / psycopg2 | 2.0.43 / 2.9.10 |
+| 벡터 | pgvector | 0.3.6 |
+| GPU 이미지 | CUDA cuDNN runtime / Ubuntu | 12.4.1 / 22.04 |
+
+## 시스템 아키텍처
+
+~~~mermaid
+flowchart LR
+    Client[관리자 또는 메인 서비스] -->|JWT / REST| Flask[Flask Routes]
+    Flask --> Image[이미지 다운로드·검증]
+    Image --> Insight[InsightFace / ArcFace]
+    Insight --> Vector[512차원 임베딩]
+    Vector --> DB[(메인 PostgreSQL + pgvector)]
+    Flask --> S3[S3 presigned URL]
+    Flask --> Hub[StarSnap Hub 로그]
+~~~
+
+AI 서버는 별도 데이터 저장소를 두지 않고 메인 서비스의 `star` 스키마를 공유합니다. 스키마와 JWT 설정을 메인 백엔드와 호환되게 유지해야 하며, GPU가 없을 때 사용할 provider 정책은 환경 설정으로 결정합니다.
+
+상세 엔드포인트와 인증 조건은 [API_SPEC.md](API_SPEC.md)를 기준으로 합니다.
+
 ## 프로젝트 구조
 
 ```
@@ -138,8 +171,9 @@ curl -X PUT "<presignedUrl>" \
 }
 ```
 
-### `GET /health`
+### `GET /api/health`
 헬스 체크 엔드포인트입니다.
+- Docker 이미지 기준으로 컨테이너 내부 `HEALTHCHECK`가 `/api/health`를 **30분마다** 호출합니다.
 
 ### `POST /api/match/star`
 업로드한 사진의 얼굴 임베딩을 추출하고, 등록된 `star.face_image_vector`와 비교해 가장 유사한 스타 1명을 반환합니다.
@@ -218,6 +252,33 @@ Postman 설정:
   - `X-Source-Width`: 원본 이미지 너비
   - `X-Source-Height`: 원본 이미지 높이
 
+    ### `POST /api/test/face-vector`
+    테스트용 API입니다. 업로드한 인물 사진에서 얼굴 임베딩 벡터를 추출해 **JSON response body**로 반환합니다.
+
+    요청 form-data:
+    - `file` (required): 이미지 파일
+        - `max_dim` (optional): 긴 변 기준 최대 픽셀 수. 기본값은 `ARCFACE_MAX_IMAGE_DIM`이며, 큰 이미지를 더 빠르게 처리하고 싶을 때 더 작은 값으로 낮출 수 있습니다.
+
+    응답 예시:
+    ```json
+    {
+      "status": "ok",
+      "embedding_dim": 512,
+      "embedding": [0.0123, -0.0456, ...],
+      "bbox": [120, 80, 220, 220],
+      "confidence": 0.99,
+      "width": 1920,
+      "height": 1080
+    }
+    ```
+
+    curl 예시:
+    ```bash
+    curl -X POST "http://localhost:8000/api/test/face-vector" \
+          -F "file=@/path/to/person.jpg" \
+          -F "max_dim=1024"
+    ```
+
 ## 빠른 테스트 플로우
 
 1) starsnap-backend에서 Access Token 발급
@@ -248,6 +309,7 @@ DEBUG=true
 ARCFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
 ARCFACE_MODEL_NAME=buffalo_l
 ARCFACE_DET_SIZE=640
+ARCFACE_MAX_IMAGE_DIM=1280
 
 # /api/match/star 최소 유사도 임계값
 MATCH_MIN_SIMILARITY=0.45
@@ -286,6 +348,9 @@ python app.py
 docker build -t starsnap-ai-backend -f dockerfile .
 docker run --rm --gpus all -p 8000:8000 --env-file .env starsnap-ai-backend
 ```
+
+헬스 체크 기본값(현재 `dockerfile` 기준):
+- `HEALTHCHECK --interval=30m --timeout=10s --start-period=1m --retries=3`
 
 실행 후 로그에서 아래처럼 provider 적용 상태를 확인하세요.
 - 기대값: `Applied providers: ['CUDAExecutionProvider', ...]`
