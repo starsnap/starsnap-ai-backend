@@ -10,6 +10,7 @@ multipart/form-data 바디를 생성하는 헬퍼(`build_multipart_payload`)를 
 """
 from urllib import request as urllib_request, error as urllib_error
 import json
+import logging
 from typing import Optional, Tuple, Dict, Any
 import uuid
 import mimetypes
@@ -68,7 +69,34 @@ def forward_request(
     On connection error returns (error_dict, 502, {}).
     """
     hdrs = dict(headers or {})
-    req = urllib_request.Request(url, data=body, headers=hdrs, method=method.upper())
+
+    # sanitize Content-Type header to avoid adding a charset parameter that some servers
+    # (Spring multipart resolver) treat as unsupported, e.g. "multipart/form-data;...;charset=UTF-8".
+    if "Content-Type" in hdrs:
+        # only keep the media type and boundary if present
+        parts = hdrs["Content-Type"].split(";")
+        # keep up to boundary param (boundary may contain =), so rebuild by keeping parts that include 'boundary' or are the main type
+        main = parts[0].strip()
+        boundary_part = None
+        for p in parts[1:]:
+            if "boundary" in p:
+                boundary_part = p.strip()
+                break
+        hdrs["Content-Type"] = f"{main}" + (f"; {boundary_part}" if boundary_part else "")
+
+    # Build the Request without headers first, then add headers via add_header to
+    # ensure urllib does not mutate/append charset unexpectedly.
+    req = urllib_request.Request(url, data=body, method=method.upper())
+    for k, v in hdrs.items():
+        req.add_header(k, v)
+
+    logger = logging.getLogger(__name__)
+    logger.debug(
+        "Forwarding request method=%s content_type=%s header_count=%d",
+        method.upper(),
+        hdrs.get("Content-Type"),
+        len(hdrs),
+    )
 
     try:
         with urllib_request.urlopen(req, timeout=timeout) as resp:
