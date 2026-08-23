@@ -8,4 +8,6 @@ from app import create_app
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    # debug/reloader는 설정값을 따르도록 하여 컨테이너에서 불필요한 이중 로딩을 방지한다.
+    debug_mode = bool(app.config.get("DEBUG", False))
+    app.run(host="0.0.0.0", port=8000, debug=debug_mode, use_reloader=debug_mode)
