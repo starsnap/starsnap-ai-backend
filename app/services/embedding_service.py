@@ -4,6 +4,8 @@
 from typing import Optional, Dict, Any
 import numpy as np
 from insightface.app import FaceAnalysis
+import logging
+import time
 
 from app.utils import (
     l2_normalize,
@@ -11,6 +13,7 @@ from app.utils import (
     decode_image_bytes,
     bgr_to_rgb,
     get_image_dimensions,
+    resize_image_to_max_dim,
     crop_image_by_bbox,
     encode_image_to_bytes,
 )
@@ -30,6 +33,7 @@ class EmbeddingService:
         model_name: str | None = None,
         det_size: tuple[int, int] | None = None,
         default_min_similarity: float | None = None,
+        allowed_modules: list[str] | None = None,
     ):
         """
         임베딩 서비스 초기화
@@ -46,14 +50,90 @@ class EmbeddingService:
             det_size = (det, det)
         if default_min_similarity is None:
             default_min_similarity = Config.MATCH_MIN_SIMILARITY
+        self.max_image_dim = int(getattr(Config, "ARCFACE_MAX_IMAGE_DIM", 1280) or 0)
+        if allowed_modules is None:
+            # 임베딩 추출/매칭에 필요한 모듈만 로드해 초기화와 추론 오버헤드를 줄인다.
+            allowed_modules = ["detection", "recognition"]
+
+        logger = logging.getLogger(__name__)
 
         self.default_min_similarity = default_min_similarity
+        self.providers = providers  # 외부에서 실제 provider 목록 확인용
         ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
 
-        self.face_app = FaceAnalysis(name=model_name, providers=providers)
-        self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)
+        # 부팅 시점에 실제 ORT provider 가용 상태를 남긴다.
+        try:
+            import onnxruntime as ort
 
-    def extract_face_embedding(self, image_bytes: bytes) -> Optional[Dict[str, Any]]:
+            available = ort.get_available_providers()
+            logger.info("[onnxruntime] available_providers=%s", available)
+            if "CUDAExecutionProvider" in providers and "CUDAExecutionProvider" not in available:
+                logger.warning(
+                    "[onnxruntime] CUDAExecutionProvider requested but unavailable. "
+                    "Requested=%s, available=%s",
+                    providers,
+                    available,
+                )
+        except Exception as e:
+            logger.warning("[onnxruntime] failed to inspect providers: %s", e)
+
+        self.face_app = FaceAnalysis(
+            name=model_name,
+            providers=providers,
+            allowed_modules=allowed_modules,
+        )
+        self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)
+        self.det_size = det_size
+        logger.info(
+            "[insightface] configured providers=%s ctx_id=%s det_size=%s model=%s allowed_modules=%s",
+            providers,
+            ctx_id,
+            det_size,
+            model_name,
+            allowed_modules,
+        )
+
+        # 첫 실요청에서 1분 가까운 지연이 발생하지 않도록 시작 시점에 1회 워밍업.
+        self._warmup()
+
+    def _warmup(self) -> None:
+        logger = logging.getLogger(__name__)
+        try:
+            h, w = self.det_size
+            # 고정 크기 더미 이미지를 한 번 태워 detector/recognizer 초기 CUDA 경로를 준비한다.
+            dummy = np.zeros((int(h), int(w), 3), dtype=np.uint8)
+            t0 = time.monotonic()
+            _ = self.face_app.get(dummy)
+            logger.info("[insightface] warmup done in %.0fms det_size=%s", (time.monotonic() - t0) * 1000, self.det_size)
+        except Exception as e:
+            logger.warning("[insightface] warmup failed: %s", e)
+
+    @property
+    def active_providers(self) -> list[str]:
+        """실제 로딩된 ONNX 세션의 provider 목록을 반환한다.
+        모델이 없으면 초기화 시 설정된 providers를 반환한다."""
+        try:
+            models = getattr(self.face_app, "models", {})
+            if models:
+                first_model = next(iter(models.values()))
+                session = getattr(first_model, "session", None)
+                if session is not None:
+                    return list(session.get_providers())
+        except Exception:
+            pass
+        return list(self.providers)
+
+    @property
+    def is_gpu(self) -> bool:
+        """GPU(CUDA) 로 실행 중이면 True."""
+        return "CUDAExecutionProvider" in self.active_providers
+
+    @property
+    def device(self) -> str:
+        """'GPU' 또는 'CPU' 문자열 반환."""
+        return "GPU" if self.is_gpu else "CPU"
+
+    def extract_face_embedding(self, image_bytes: bytes, max_dim: int | None = None) -> Optional[Dict[str, Any]]:
         """
         이미지에서 얼굴 임베딩 추출
         
@@ -69,53 +149,111 @@ class EmbeddingService:
                 - height: 이미지 높이
                 반실패 시 None
         """
+        logger = logging.getLogger(__name__)
+        t_step = time.monotonic()
+
         # 이미지 디코딩
         bgr = decode_image_bytes(image_bytes)
+        logger.info("[embedding] decode=%.0fms", (time.monotonic() - t_step) * 1000)
         if bgr is None:
             return None
-        
+
+        t_step = time.monotonic()
+        original_dimensions = get_image_dimensions(bgr)
+
+        if max_dim is None:
+            max_dim = self.max_image_dim
+
+        # 큰 이미지는 먼저 축소해서 얼굴 검출 비용을 줄인다.
+        processed_bgr, scale = resize_image_to_max_dim(bgr, int(max_dim) if max_dim is not None else 0)
+        logger.info("[embedding] resize=%.0fms scale=%.4f", (time.monotonic() - t_step) * 1000, scale)
+
+        t_step = time.monotonic()
         # BGR -> RGB 변환
-        rgb = bgr_to_rgb(bgr)
-        
+        rgb = bgr_to_rgb(processed_bgr)
+        logger.info("[embedding] bgr2rgb=%.0fms", (time.monotonic() - t_step) * 1000)
+
+        t_step = time.monotonic()
         # 얼굴 감지
         faces = self.face_app.get(rgb)
+        logger.info("[embedding] face_detection=%.0fms num_faces=%d", (time.monotonic() - t_step) * 1000, len(faces))
         if len(faces) == 0:
             return None
         
         # 가장 큰 얼굴 선택 (바운딩박스 면적 기준)
         face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
         
+        t_step = time.monotonic()
         # 임베딩 정규화
         embedding = face.embedding  # numpy array
         embedding = l2_normalize(embedding)
-        
+        logger.info("[embedding] normalize=%.0fms", (time.monotonic() - t_step) * 1000)
+
         # 바운딩박스 변환: (x1, y1, x2, y2) -> (x, y, w, h)
         x1, y1, x2, y2 = map(int, face.bbox[:4])
         bbox = [x1, y1, x2 - x1, y2 - y1]
-        
+
+        # 축소된 이미지에서 검출된 bbox를 원본 기준으로 환산
+        if scale and scale != 1.0:
+            bbox = [
+                int(round(bbox[0] / scale)),
+                int(round(bbox[1] / scale)),
+                int(round(bbox[2] / scale)),
+                int(round(bbox[3] / scale)),
+            ]
+
         # 신뢰도 추출
         confidence = float(face.det_score) if hasattr(face, 'det_score') else None
-        
-        # 이미지 크기
-        dimensions = get_image_dimensions(bgr)
         
         return {
             "embedding": embedding,
             "bbox": bbox,
             "confidence": confidence,
-            **dimensions
+            **original_dimensions
         }
 
-    def save_star_embedding(self, star_id: str, embedding: np.ndarray) -> bool:
-        """Star 테이블의 face_image_vector 필드에 임베딩 저장"""
+    def save_star_embedding_with_reason(self, star_id: str, embedding: np.ndarray) -> tuple[bool, Optional[str]]:
+        """Star 테이블의 face_image_vector 필드에 임베딩 저장.
+
+        Returns:
+            (success, reason)
+            reason examples: star_not_found, invalid_embedding_dim:<n>, db_error:<ExceptionName>
+        """
         star = db.session.get(Star, star_id)
         if star is None:
-            return False
+            return False, "star_not_found"
 
         # pgvector는 list[float] 형태로 저장한다.
-        star.face_image_vector = embedding.astype(np.float32).tolist()
-        db.session.commit()
-        return True
+        try:
+            vec = np.asarray(embedding, dtype=np.float32)
+            if vec.ndim != 1:
+                # flatten if necessary
+                vec = vec.ravel()
+
+            expected_dim = 512
+            if vec.shape[0] != expected_dim:
+                return False, f"invalid_embedding_dim:{vec.shape[0]}"
+
+            # convert to Python list for SQLAlchemy/pgvector
+            star.face_image_vector = vec.tolist()
+            db.session.commit()
+            return True, None
+        except Exception as e:
+            # rollback on error and log for debugging
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.exception("Failed to save star embedding for %s: %s", star_id, e)
+            return False, f"db_error:{e.__class__.__name__}"
+
+    def save_star_embedding(self, star_id: str, embedding: np.ndarray) -> bool:
+        """Backward-compatible wrapper: 상세 사유 없이 성공 여부만 반환."""
+        success, _ = self.save_star_embedding_with_reason(star_id=star_id, embedding=embedding)
+        return success
 
     def get_star_embedding_vector(self, star_id: str) -> Optional[np.ndarray]:
         """Star ID로 임베딩 벡터 조회"""
@@ -157,14 +295,32 @@ class EmbeddingService:
             "similarity": best_similarity
         }
 
-    def extract_largest_face_for_test(self, image_bytes: bytes) -> Optional[Dict[str, Any]]:
+    def extract_largest_face_for_test(self, image_bytes: bytes, max_dim: int | None = None) -> Optional[Dict[str, Any]]:
         """가장 큰 얼굴 1개를 잘라서 이미지 바이트와 함께 반환한다."""
+        logger = logging.getLogger(__name__)
+        t_step = time.monotonic()
+
         bgr = decode_image_bytes(image_bytes)
+        logger.info("[extract_largest_face] decode=%.0fms", (time.monotonic() - t_step) * 1000)
         if bgr is None:
             return None
 
-        rgb = bgr_to_rgb(bgr)
+        original_dimensions = get_image_dimensions(bgr)
+
+        if max_dim is None:
+            max_dim = self.max_image_dim
+
+        t_step = time.monotonic()
+        processed_bgr, scale = resize_image_to_max_dim(bgr, int(max_dim) if max_dim is not None else 0)
+        logger.info("[extract_largest_face] resize=%.0fms scale=%.4f", (time.monotonic() - t_step) * 1000, scale)
+
+        t_step = time.monotonic()
+        rgb = bgr_to_rgb(processed_bgr)
+        logger.info("[extract_largest_face] bgr2rgb=%.0fms", (time.monotonic() - t_step) * 1000)
+
+        t_step = time.monotonic()
         faces = self.face_app.get(rgb)
+        logger.info("[extract_largest_face] face_detection=%.0fms num_faces=%d", (time.monotonic() - t_step) * 1000, len(faces))
         if len(faces) == 0:
             return None
 
@@ -172,6 +328,13 @@ class EmbeddingService:
 
         x1, y1, x2, y2 = map(int, face.bbox[:4])
         bbox = [x1, y1, x2 - x1, y2 - y1]
+        if scale and scale != 1.0:
+            bbox = [
+                int(round(bbox[0] / scale)),
+                int(round(bbox[1] / scale)),
+                int(round(bbox[2] / scale)),
+                int(round(bbox[3] / scale)),
+            ]
         confidence = float(face.det_score) if hasattr(face, 'det_score') else None
 
         crop = crop_image_by_bbox(bgr, bbox)
@@ -182,10 +345,9 @@ class EmbeddingService:
         if face_image_bytes is None:
             return None
 
-        dimensions = get_image_dimensions(bgr)
         return {
             "bbox": bbox,
             "confidence": confidence,
             "face_image_bytes": face_image_bytes,
-            **dimensions,
+            **original_dimensions,
         }

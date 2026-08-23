@@ -45,6 +45,28 @@ def get_image_dimensions(image: np.ndarray) -> Dict[str, int]:
     height, width = image.shape[:2]
     return {'width': width, 'height': height}
 
+def resize_image_to_max_dim(image: np.ndarray, max_dim: int) -> tuple[np.ndarray, float]:
+    """긴 변이 max_dim을 넘으면 비율을 유지해 축소한다.
+
+    Returns:
+        (resized_image, scale)
+        - scale은 원본 대비 축소 비율(0 < scale <= 1)
+        - resize가 필요 없으면 scale=1.0
+    """
+    if image is None or max_dim is None or max_dim <= 0:
+        return image, 1.0
+
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest <= max_dim:
+        return image, 1.0
+
+    scale = max_dim / float(longest)
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
+    resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+    return resized, scale
+
 def crop_image_by_bbox(image: np.ndarray, bbox: List[int]) -> Optional[np.ndarray]:
     """(x, y, w, h) bbox 기준으로 이미지를 안전하게 크롭한다."""
     if image is None or len(bbox) != 4:
