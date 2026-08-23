@@ -13,4 +13,3 @@ psycopg2-binary~=2.9.10
 PyJWT~=2.10.1
 PyYAML~=6.0
 # dynaconf removed (not currently used)
-
