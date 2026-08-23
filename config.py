@@ -110,5 +110,5 @@ class Config:
 
     # Access Log Forwarder
     ACCESS_LOG_ENABLED: bool = os.getenv("ACCESS_LOG_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
-    ACCESS_LOG_URL: str = os.getenv("ACCESS_LOG_URL", "http://host.docker.internal:7070/api/server-logs")
+    ACCESS_LOG_URL: str = os.getenv("ACCESS_LOG_URL", "http://host.docker.internal:8081/api/server-logs")
     ACCESS_LOG_SERVICE_NAME: str = os.getenv("ACCESS_LOG_SERVICE_NAME", "starsnap-ai-backend")
