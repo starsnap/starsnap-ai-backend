@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,28 @@ def _require_env(key: str) -> str:
     return value
 
 
+def _require_env_or_file(value_key: str, file_key: str) -> str:
+    direct_value = os.getenv(value_key)
+    if direct_value is not None and direct_value.strip():
+        return direct_value
+
+    configured_path = os.getenv(file_key)
+    if configured_path is None or not configured_path.strip():
+        raise RuntimeError(
+            f"Missing required secret: set {value_key} or {file_key}"
+        )
+
+    try:
+        file_value = Path(configured_path.strip()).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as e:
+        raise RuntimeError(
+            f"Could not read secret file configured by {file_key}"
+        ) from e
+    if not file_value:
+        raise RuntimeError(f"Secret file configured by {file_key} must not be empty")
+    return file_value
+
+
 def _require_int_env(key: str) -> int:
     raw = _require_env(key)
     try:
@@ -69,6 +92,15 @@ def _require_float_env(key: str) -> float:
         raise RuntimeError(f"Environment variable {key} must be float, got: {raw}") from e
 
 
+def _require_similarity_env(key: str) -> float:
+    value = _require_float_env(key)
+    if not math.isfinite(value) or value < -1.0 or value > 1.0:
+        raise RuntimeError(
+            f"Environment variable {key} must be a finite number between -1 and 1, got: {value}"
+        )
+    return value
+
+
 def _require_bool_env(key: str) -> bool:
     raw = _require_env(key).strip().lower()
     if raw in {"1", "true", "yes", "on"}:
@@ -76,6 +108,29 @@ def _require_bool_env(key: str) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     raise RuntimeError(f"Environment variable {key} must be bool, got: {raw}")
+
+
+def _bool_env_with_default(key: str, default: bool) -> bool:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Environment variable {key} must be bool, got: {raw}")
+
+
+def _int_env_with_default(key: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(key, str(default))
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise RuntimeError(f"Environment variable {key} must be int, got: {raw}") from e
+    if value < minimum:
+        raise RuntimeError(f"Environment variable {key} must be >= {minimum}, got: {raw}")
+    return value
 
 
 # DB 관련 필수 설정
@@ -99,10 +154,36 @@ class Config:
     # 얼굴 검출용 입력 이미지 최대 긴 변 길이 (큰 이미지는 자동 축소)
     ARCFACE_MAX_IMAGE_DIM = int(os.getenv("ARCFACE_MAX_IMAGE_DIM", "1280"))
     # ArcFace 기준 설명
-    MATCH_MIN_SIMILARITY = _require_float_env("MATCH_MIN_SIMILARITY")
+    MATCH_MIN_SIMILARITY = _require_similarity_env("MATCH_MIN_SIMILARITY")
 
     # JWT
     JWT_ACCESS_SECRET = _require_env("JWT_ACCESS_SECRET")
+
+    # 메인 백엔드 -> AI 백엔드 전용 내부 API 인증/제한
+    AI_INTERNAL_TOKEN = _require_env_or_file(
+        "AI_INTERNAL_TOKEN",
+        "AI_INTERNAL_TOKEN_FILE",
+    )
+    AI_FACE_ANALYSIS_MAX_IMAGE_BYTES = _int_env_with_default(
+        "AI_FACE_ANALYSIS_MAX_IMAGE_BYTES",
+        15 * 1024 * 1024,
+    )
+    AI_FACE_ANALYSIS_MAX_PIXELS = _int_env_with_default(
+        "AI_FACE_ANALYSIS_MAX_PIXELS",
+        60_000_000,
+    )
+    AI_FACE_ANALYSIS_MAX_FACES = _int_env_with_default(
+        "AI_FACE_ANALYSIS_MAX_FACES",
+        10,
+    )
+    AI_FACE_ANALYSIS_MATCH_STARS = _bool_env_with_default(
+        "AI_FACE_ANALYSIS_MATCH_STARS",
+        True,
+    )
+    AI_FACE_MODEL_VERSION = (
+        os.getenv("AI_FACE_MODEL_VERSION", "insightface-0.7.3").strip()
+        or "insightface-0.7.3"
+    )
 
     # PHOTO API: env 우선, 없으면 services.yaml에 정의된 값을 사용
     PHOTO_API_URL = _require_env("PHOTO_API_URL")

@@ -2,7 +2,7 @@
 
 > 서버 루트: `starsnap-main/starsnap-ai-backend`
 > Server origin: `http://localhost:8000`
-> 엔드포인트: 6개
+> 엔드포인트: 7개
 
 ## 1. 공통 규칙
 
@@ -12,13 +12,13 @@
 | Blueprint prefix | `/api` |
 | 기본 응답 | 명시적 API 응답은 JSON. 얼굴 crop API만 JPEG binary |
 | CORS | 앱 설정과 `flask-cors` 의존성이 없어 미지원 |
-| 인증 | `/enroll`만 HttpOnly `access-token` 쿠키 JWT + `ADMIN`; 나머지는 공개 |
+| 인증 | `/enroll`은 HttpOnly 쿠키 JWT + `ADMIN`; `/internal/v1/face-analysis`는 전용 Bearer token; 나머지는 공개 |
 | DB | 메인 PostgreSQL의 `star` table과 `vector(512)` column 공유 |
 | 자동 method | Flask가 `OPTIONS`, GET route에는 `HEAD`도 제공하지만 아래에는 업무 method만 기재 |
 
-등록되지 않은 path/method의 `404`, `405`와 잡히지 않은 `500`은 Flask 기본 HTML 응답일 수 있다. 모든 요청은 access-log 설정이 활성화된 경우 Hub `POST /api/server-logs`로 비동기 전송된다. multipart의 파일 내용은 로그에서 제외되며, 비밀번호·토큰·서명 query와 `Authorization`/`Cookie`/`Set-Cookie` 등 민감 header는 `[REDACTED]`로 치환된다.
+등록되지 않은 path/method의 `404`, `405`와 잡히지 않은 `500`은 Flask 기본 HTML 응답일 수 있다. 모든 요청은 access-log 설정이 활성화된 경우 Hub `POST /api/server-logs`로 비동기 전송된다. multipart의 파일 내용은 로그에서 제외되며, 비밀번호·토큰·서명 query와 `Authorization`/`Cookie`/`Set-Cookie` 등 민감 header는 `[REDACTED]`로 치환된다. 내부 얼굴 분석 경로는 벡터 유출을 막기 위해 요청·응답 본문 전체를 고정된 생략 문구로 대체한다.
 
-소스: [app.py](../../starsnap-main/starsnap-ai-backend/app.py), [app/__init__.py](../../starsnap-main/starsnap-ai-backend/app/__init__.py), [enroll.py](../../starsnap-main/starsnap-ai-backend/app/routes/enroll.py)
+소스: [app.py](../../starsnap-main/starsnap-ai-backend/app.py), [app/__init__.py](../../starsnap-main/starsnap-ai-backend/app/__init__.py), [enroll.py](../../starsnap-main/starsnap-ai-backend/app/routes/enroll.py), [face_analysis.py](../../starsnap-main/starsnap-ai-backend/app/routes/face_analysis.py)
 
 ## 2. 엔드포인트 요약
 
@@ -26,6 +26,7 @@
 |---|---|---|---|---|
 | 운영 | `GET` | `/api/health` | 공개 | `200 {"status":"ok"}` |
 | 운영 | `POST` | `/api/enroll` | HttpOnly `access-token` 쿠키 + `ADMIN` | `201` 또는 upstream status |
+| 내부 | `POST` | `/api/internal/v1/face-analysis` | `Authorization: Bearer <AI_INTERNAL_TOKEN>` | `200 JSON` |
 | 디버그 | `GET` | `/api/embedding/star/{star_id}` | 공개 | `200` |
 | 운영 | `POST` | `/api/match/star` | 공개 | `200` |
 | 테스트 | `POST` | `/api/test/largest-face` | 공개 | `200 image/jpeg` |
@@ -54,6 +55,8 @@ Cookie: access-token=<access-token>
 | `401` | `{"error":"Invalid token type: JWT=<value>"}` |
 | `403` | `{"error":"Admin only"}` |
 
+`POST /api/internal/v1/face-analysis`는 사용자 JWT와 분리된 서버 간 토큰을 사용한다. 토큰은 `AI_INTERNAL_TOKEN` 또는 `AI_INTERNAL_TOKEN_FILE`에서 로드하며 `Authorization: Bearer <resolved-token>`으로 전달한다. 토큰은 constant-time 비교되고, 누락·불일치는 `401` JSON과 `WWW-Authenticate: Bearer`를 반환한다. 토큰 값은 access log에서 제거된다.
+
 근거: [jwt_utils.py](../../starsnap-main/starsnap-ai-backend/app/utils/jwt_utils.py)
 
 ## 4. 상세 API
@@ -69,6 +72,59 @@ Cookie: access-token=<access-token>
 ```
 
 Docker health check도 이 path를 사용한다.
+
+### `POST /api/internal/v1/face-analysis`
+
+스냅 원본 사진에서 얼굴을 최대 `AI_FACE_ANALYSIS_MAX_FACES`개 추출하고, L2-normalized 512차원 벡터와 선택적인 등록 스타 매칭 결과를 반환하는 서버 간 API다. 얼굴은 면적 내림차순, 좌표 순으로 정렬되어 `faceIndex`가 안정적이다. `AI_FACE_ANALYSIS_MATCH_STARS=true`이면 등록 스타 벡터를 요청당 한 번 조회하고 모든 얼굴을 행렬 연산으로 비교한다. `false`이면 Star DB를 조회하지 않고 임베딩만 반환한다.
+
+Request:
+
+```http
+Authorization: Bearer <AI_INTERNAL_TOKEN>
+X-Request-Id: <optional-correlation-id>
+Content-Type: multipart/form-data
+```
+
+| Field | 타입 | 필수 | 처리 |
+|---|---|---:|---|
+| `file` | binary | 예 | 최대 `AI_FACE_ANALYSIS_MAX_IMAGE_BYTES`; 디코딩 가능한 이미지여야 함 |
+| `maxFaces` | integer | 아니요 | 기본은 설정값, 범위 `1..AI_FACE_ANALYSIS_MAX_FACES` |
+
+`X-Request-Id`가 있으면 최대 128자로 응답 body/header에 전달하고, 없으면 UUID를 생성한다.
+
+```json
+{
+  "schemaVersion": "1",
+  "requestId": "snap-request-123",
+  "image": {"width": 1920, "height": 1080},
+  "model": {
+    "name": "buffalo_l",
+    "version": "insightface-0.7.3",
+    "embeddingDimension": 512,
+    "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]
+  },
+  "detectedFaceCount": 1,
+  "processedFaceCount": 1,
+  "truncated": false,
+  "faces": [
+    {
+      "faceIndex": 0,
+      "bbox": [120, 80, 220, 220],
+      "detectionConfidence": 0.99,
+      "embedding": [0.0123, -0.0456],
+      "bestMatch": {"starId": "star_001", "similarity": 0.92}
+    }
+  ]
+}
+```
+
+- `AI_FACE_ANALYSIS_MATCH_STARS=true`일 때 `bestMatch`는 `MATCH_MIN_SIMILARITY` 이상인 경우만 object이고, 아니면 `null`이다.
+- `AI_FACE_ANALYSIS_MATCH_STARS=false`이면 Star DB 인덱스를 읽지 않으며 모든 얼굴의 `bestMatch`가 `null`이다. 얼굴 임베딩과 나머지 응답 계약은 동일하다.
+- 유효 이미지에 얼굴이 없으면 오류가 아니라 `200`, count `0`, `faces: []`다.
+- 감지 벡터가 없거나 유효한 512차원이 아니면 해당 얼굴은 처리 목록에서 제외되어 `processedFaceCount`가 작을 수 있다.
+- `state=true`이고 `face_image_vector IS NOT NULL`인 스타만 자동 매칭 후보로 사용한다.
+
+JSON 오류 body는 `{"error":{"code":"...","message":"..."},"requestId":"..."}` 형식이다. 주요 상태는 인증 실패 `401`, 입력 오류 `400`, 크기 초과 `413`, 이미지 디코딩 실패 `422`, 서비스 미초기화 `503`, 분석 실패 `500`이다.
 
 ### `POST /api/enroll`
 
@@ -240,11 +296,17 @@ Request: `multipart/form-data`
 - 실행: `DEBUG`.
 - ML: `ARCFACE_PROVIDERS`, `ARCFACE_MODEL_NAME`, `ARCFACE_DET_SIZE`, `MATCH_MIN_SIMILARITY`.
 - 인증: `JWT_ACCESS_SECRET`.
+- 내부 API 인증: `AI_INTERNAL_TOKEN` 또는 `AI_INTERNAL_TOKEN_FILE` (JWT secret과 분리된 값). 둘 다 설정하면 직접 환경변수가 우선하고, 파일 값은 trim 후 사용한다. 어느 쪽도 없거나 파일이 비어 있으면 시작 시 실패한다.
 - upstream: `PHOTO_API_URL`, `PHOTO_API_TIMEOUT_SECONDS`.
 
 선택 기본값:
 
 - `ARCFACE_MAX_IMAGE_DIM=1280`.
+- `AI_FACE_ANALYSIS_MAX_IMAGE_BYTES=15728640` (15 MiB).
+- `AI_FACE_ANALYSIS_MAX_PIXELS=60000000` (디코딩 전 헤더 검사 총 픽셀 상한).
+- `AI_FACE_ANALYSIS_MAX_FACES=10`.
+- `AI_FACE_ANALYSIS_MATCH_STARS=true` (기존 호환 직접 매칭; `false`는 DB 비의존 임베딩 전용 모드).
+- `AI_FACE_MODEL_VERSION=insightface-0.7.3`.
 - `ACCESS_LOG_ENABLED=true`.
 - `ACCESS_LOG_SERVICE_NAME=starsnap-ai-backend`.
 - 코드의 기본 `ACCESS_LOG_URL`은 Hub server port `8081`의 `http://host.docker.internal:8081/api/server-logs`다.
@@ -254,10 +316,10 @@ Request: `multipart/form-data`
 ## 6. 구현 주의사항
 
 1. `/embedding/star/*`, `/test/largest-face`, `/test/face-vector`가 인증 없이 공개된다.
-2. 업로드 파일의 크기, MIME, 확장자, 이미지 해상도 제한과 rate limit이 없다.
+2. 기존 공개/관리자 업로드 API에는 파일 크기, MIME, 확장자, 이미지 해상도 제한과 rate limit이 없다. 내부 얼굴 분석 API만 byte 제한을 둔다.
 3. CORS가 없어 browser cross-origin 호출은 reverse proxy 설정 없이는 허용되지 않는다.
 4. presign-only 성공 계약은 upstream에 종속된다.
-5. HTTP API 자동화 테스트가 없다. 루트 `test.py`는 API test가 아니라 로컬 이미지 비교 script다.
+5. 내부 얼굴 분석은 `test_embedding_service_unit.py`, `test_face_analysis_route_unit.py`, `test_image_utils_unit.py`에서 모델을 mock한 자동화 테스트를 제공한다. 기존 루트 `test.py`는 API test가 아니라 로컬 이미지 비교 script다.
 6. 일부 기본 오류는 JSON이 아니라 Flask HTML일 수 있다.
 
-핵심 구현 근거: [enroll.py](../../starsnap-main/starsnap-ai-backend/app/routes/enroll.py), [embedding_service.py](../../starsnap-main/starsnap-ai-backend/app/services/embedding_service.py), [http_forward.py](../../starsnap-main/starsnap-ai-backend/app/utils/http_forward.py), [config.py](../../starsnap-main/starsnap-ai-backend/config.py).
+핵심 구현 근거: [enroll.py](../../starsnap-main/starsnap-ai-backend/app/routes/enroll.py), [face_analysis.py](../../starsnap-main/starsnap-ai-backend/app/routes/face_analysis.py), [embedding_service.py](../../starsnap-main/starsnap-ai-backend/app/services/embedding_service.py), [http_forward.py](../../starsnap-main/starsnap-ai-backend/app/utils/http_forward.py), [config.py](../../starsnap-main/starsnap-ai-backend/config.py).

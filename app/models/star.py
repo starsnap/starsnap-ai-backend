@@ -17,6 +17,7 @@ class Star(db.Model):
         explanation (str): 설명
         image_key (str): 이미지 키
         face_image_vector (Vector): 얼굴 임베딩 벡터
+        state (bool): 활성 상태
         star_group_id (str): 스타 그룹 ID
         created_at (datetime): 생성 시간
     """
@@ -32,6 +33,7 @@ class Star(db.Model):
     name = db.Column(db.String(255), nullable=False)
     nickname = db.Column(db.String(255), nullable=False, unique=True)
     star_group_id = db.Column(db.String(255), db.ForeignKey('star_group.id'))
+    state = db.Column(db.Boolean, nullable=False, default=True)
 
     def to_dict(self):
         """모델을 딕셔너리로 변환"""

@@ -51,6 +51,11 @@ class EmbeddingService:
         if default_min_similarity is None:
             default_min_similarity = Config.MATCH_MIN_SIMILARITY
         self.max_image_dim = int(getattr(Config, "ARCFACE_MAX_IMAGE_DIM", 1280) or 0)
+        self.max_image_pixels = int(
+            getattr(Config, "AI_FACE_ANALYSIS_MAX_PIXELS", 60_000_000) or 60_000_000
+        )
+        self.max_faces = int(getattr(Config, "AI_FACE_ANALYSIS_MAX_FACES", 10) or 10)
+        self.model_name = model_name
         if allowed_modules is None:
             # 임베딩 추출/매칭에 필요한 모듈만 로드해 초기화와 추론 오버헤드를 줄인다.
             allowed_modules = ["detection", "recognition"]
@@ -133,13 +138,155 @@ class EmbeddingService:
         """'GPU' 또는 'CPU' 문자열 반환."""
         return "GPU" if self.is_gpu else "CPU"
 
+    @staticmethod
+    def _face_sort_key(face: Any) -> tuple[float, float, float, float, float, float]:
+        """큰 얼굴 우선, 이후 좌표/신뢰도 순으로 안정적인 처리 순서를 만든다."""
+        bbox = np.asarray(face.bbox[:4], dtype=np.float64)
+        x1, y1, x2, y2 = (float(value) for value in bbox)
+        area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        confidence = float(getattr(face, "det_score", 0.0) or 0.0)
+        return (-area, x1, y1, x2, y2, -confidence)
+
+    @staticmethod
+    def _bbox_in_original_coordinates(
+        face: Any,
+        scale: float,
+        image_width: int,
+        image_height: int,
+    ) -> Optional[list[int]]:
+        """원본 좌표로 환산하고 image bounds로 clamp한 x/y/w/h를 반환한다."""
+        x1, y1, x2, y2 = map(int, face.bbox[:4])
+        bbox = [x1, y1, x2 - x1, y2 - y1]
+        if scale and scale != 1.0:
+            bbox = [int(round(value / scale)) for value in bbox]
+
+        x, y, width, height = bbox
+        clamped_x1 = min(max(x, 0), image_width)
+        clamped_y1 = min(max(y, 0), image_height)
+        clamped_x2 = min(max(x + width, 0), image_width)
+        clamped_y2 = min(max(y + height, 0), image_height)
+        if clamped_x2 <= clamped_x1 or clamped_y2 <= clamped_y1:
+            return None
+        return [
+            clamped_x1,
+            clamped_y1,
+            clamped_x2 - clamped_x1,
+            clamped_y2 - clamped_y1,
+        ]
+
+    def extract_face_embeddings(
+        self,
+        image_bytes: bytes,
+        max_faces: int | None = None,
+        max_dim: int | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        """이미지의 여러 얼굴에서 정규화된 512차원 임베딩을 추출한다.
+
+        이미지 디코딩 실패는 ``None``을 반환하고, 유효한 이미지에서 얼굴이 없는
+        경우에는 ``faces=[]``인 결과를 반환한다. 얼굴 순서는 면적 내림차순과 좌표
+        순으로 고정되어 같은 입력에 대해 안정적인 ``faceIndex``를 제공한다.
+        """
+        logger = logging.getLogger(__name__)
+        t_step = time.monotonic()
+
+        bgr = decode_image_bytes(
+            image_bytes,
+            max_pixels=int(getattr(self, "max_image_pixels", 60_000_000)),
+        )
+        logger.info("[embedding] decode=%.0fms", (time.monotonic() - t_step) * 1000)
+        if bgr is None:
+            return None
+
+        original_dimensions = get_image_dimensions(bgr)
+        if max_dim is None:
+            max_dim = self.max_image_dim
+        if max_faces is None:
+            max_faces = self.max_faces
+        max_faces = max(1, int(max_faces))
+
+        t_step = time.monotonic()
+        processed_bgr, scale = resize_image_to_max_dim(
+            bgr,
+            int(max_dim) if max_dim is not None else 0,
+        )
+        logger.info("[embedding] resize=%.0fms scale=%.4f", (time.monotonic() - t_step) * 1000, scale)
+
+        t_step = time.monotonic()
+        rgb = bgr_to_rgb(processed_bgr)
+        logger.info("[embedding] bgr2rgb=%.0fms", (time.monotonic() - t_step) * 1000)
+
+        t_step = time.monotonic()
+        detected_faces = list(self.face_app.get(rgb))
+        detected_face_count = len(detected_faces)
+        logger.info(
+            "[embedding] face_detection=%.0fms num_faces=%d",
+            (time.monotonic() - t_step) * 1000,
+            detected_face_count,
+        )
+
+        sorted_faces = sorted(detected_faces, key=self._face_sort_key)
+        selected_faces = sorted_faces[:max_faces]
+        extracted_faces: list[Dict[str, Any]] = []
+
+        t_step = time.monotonic()
+        for face in selected_faces:
+            bbox = self._bbox_in_original_coordinates(
+                face,
+                scale,
+                original_dimensions["width"],
+                original_dimensions["height"],
+            )
+            if bbox is None:
+                raise ValueError("detected face has an out-of-bounds or empty bbox")
+
+            raw_embedding = getattr(face, "embedding", None)
+            if raw_embedding is None:
+                raise ValueError("detected face has no embedding")
+
+            embedding = np.asarray(raw_embedding, dtype=np.float32).reshape(-1)
+            if embedding.shape[0] != 512 or not np.all(np.isfinite(embedding)):
+                raise ValueError(
+                    "detected face embedding must be finite and 512-dimensional "
+                    f"(dim={embedding.shape[0]})"
+                )
+
+            norm = float(np.linalg.norm(embedding))
+            if not np.isfinite(norm) or norm <= 0.0:
+                raise ValueError("detected face embedding has a non-positive norm")
+
+            normalized_embedding = l2_normalize(embedding)
+            extracted_faces.append({
+                "face_index": len(extracted_faces),
+                "embedding": normalized_embedding,
+                "bbox": bbox,
+                "confidence": (
+                    float(face.det_score)
+                    if hasattr(face, "det_score") and face.det_score is not None
+                    else None
+                ),
+            })
+
+        logger.info(
+            "[embedding] normalize=%.0fms processed_faces=%d truncated=%s",
+            (time.monotonic() - t_step) * 1000,
+            len(extracted_faces),
+            detected_face_count > max_faces,
+        )
+        return {
+            "faces": extracted_faces,
+            "detected_face_count": detected_face_count,
+            "processed_face_count": len(extracted_faces),
+            "truncated": detected_face_count > max_faces,
+            **original_dimensions,
+        }
+
     def extract_face_embedding(self, image_bytes: bytes, max_dim: int | None = None) -> Optional[Dict[str, Any]]:
         """
         이미지에서 얼굴 임베딩 추출
-        
+
         Args:
             image_bytes (bytes): 이미지 바이트 데이터
-            
+
         Returns:
             Optional[Dict]: 다음 정보 포함:
                 - embedding: np.array (정규화된 임베딩)
@@ -149,67 +296,21 @@ class EmbeddingService:
                 - height: 이미지 높이
                 반실패 시 None
         """
-        logger = logging.getLogger(__name__)
-        t_step = time.monotonic()
-
-        # 이미지 디코딩
-        bgr = decode_image_bytes(image_bytes)
-        logger.info("[embedding] decode=%.0fms", (time.monotonic() - t_step) * 1000)
-        if bgr is None:
+        result = self.extract_face_embeddings(
+            image_bytes=image_bytes,
+            max_faces=1,
+            max_dim=max_dim,
+        )
+        if result is None or not result["faces"]:
             return None
 
-        t_step = time.monotonic()
-        original_dimensions = get_image_dimensions(bgr)
-
-        if max_dim is None:
-            max_dim = self.max_image_dim
-
-        # 큰 이미지는 먼저 축소해서 얼굴 검출 비용을 줄인다.
-        processed_bgr, scale = resize_image_to_max_dim(bgr, int(max_dim) if max_dim is not None else 0)
-        logger.info("[embedding] resize=%.0fms scale=%.4f", (time.monotonic() - t_step) * 1000, scale)
-
-        t_step = time.monotonic()
-        # BGR -> RGB 변환
-        rgb = bgr_to_rgb(processed_bgr)
-        logger.info("[embedding] bgr2rgb=%.0fms", (time.monotonic() - t_step) * 1000)
-
-        t_step = time.monotonic()
-        # 얼굴 감지
-        faces = self.face_app.get(rgb)
-        logger.info("[embedding] face_detection=%.0fms num_faces=%d", (time.monotonic() - t_step) * 1000, len(faces))
-        if len(faces) == 0:
-            return None
-        
-        # 가장 큰 얼굴 선택 (바운딩박스 면적 기준)
-        face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-        
-        t_step = time.monotonic()
-        # 임베딩 정규화
-        embedding = face.embedding  # numpy array
-        embedding = l2_normalize(embedding)
-        logger.info("[embedding] normalize=%.0fms", (time.monotonic() - t_step) * 1000)
-
-        # 바운딩박스 변환: (x1, y1, x2, y2) -> (x, y, w, h)
-        x1, y1, x2, y2 = map(int, face.bbox[:4])
-        bbox = [x1, y1, x2 - x1, y2 - y1]
-
-        # 축소된 이미지에서 검출된 bbox를 원본 기준으로 환산
-        if scale and scale != 1.0:
-            bbox = [
-                int(round(bbox[0] / scale)),
-                int(round(bbox[1] / scale)),
-                int(round(bbox[2] / scale)),
-                int(round(bbox[3] / scale)),
-            ]
-
-        # 신뢰도 추출
-        confidence = float(face.det_score) if hasattr(face, 'det_score') else None
-        
+        face = result["faces"][0]
         return {
-            "embedding": embedding,
-            "bbox": bbox,
-            "confidence": confidence,
-            **original_dimensions
+            "embedding": face["embedding"],
+            "bbox": face["bbox"],
+            "confidence": face["confidence"],
+            "width": result["width"],
+            "height": result["height"],
         }
 
     def save_star_embedding_with_reason(self, star_id: str, embedding: np.ndarray) -> tuple[bool, Optional[str]]:
@@ -262,6 +363,86 @@ class EmbeddingService:
             return None
 
         return np.asarray(star.face_image_vector, dtype=np.float32)
+
+    def load_star_embedding_index(self) -> Dict[str, Any]:
+        """등록된 Star 임베딩을 요청 단위 행렬 인덱스로 한 번에 읽는다.
+
+        활성 상태이고 얼굴 벡터가 있는 Star만 등록 완료 대상으로 간주한다. ID로
+        정렬해 동일 점수의 tie-break도 재현 가능하게 유지한다.
+        """
+        rows = (
+            db.session.query(Star.id, Star.face_image_vector)
+            .filter(Star.state.is_(True), Star.face_image_vector.isnot(None))
+            .order_by(Star.id.asc())
+            .all()
+        )
+
+        star_ids: list[str] = []
+        normalized_vectors: list[np.ndarray] = []
+        for star_id, stored_embedding in rows:
+            vector = np.asarray(stored_embedding, dtype=np.float32).reshape(-1)
+            if vector.shape[0] != 512 or not np.all(np.isfinite(vector)):
+                continue
+            norm = float(np.linalg.norm(vector))
+            if not np.isfinite(norm) or norm <= 0.0:
+                continue
+            star_ids.append(str(star_id))
+            normalized_vectors.append(vector / norm)
+
+        matrix = (
+            np.vstack(normalized_vectors).astype(np.float32, copy=False)
+            if normalized_vectors
+            else np.empty((0, 512), dtype=np.float32)
+        )
+        return {"star_ids": star_ids, "embeddings": matrix}
+
+    def find_best_star_matches(
+        self,
+        face_embeddings: list[np.ndarray],
+        star_index: Optional[Dict[str, Any]] = None,
+        min_similarity: float | None = None,
+    ) -> list[Optional[Dict[str, Any]]]:
+        """여러 얼굴을 등록 스타 행렬과 한 번에 비교해 임계값 통과 결과만 반환한다."""
+        if not face_embeddings:
+            return []
+        if min_similarity is None:
+            min_similarity = self.default_min_similarity
+        if star_index is None:
+            star_index = self.load_star_embedding_index()
+
+        star_ids = list(star_index.get("star_ids", []))
+        star_matrix = np.asarray(
+            star_index.get("embeddings", np.empty((0, 512), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        if not star_ids or star_matrix.shape != (len(star_ids), 512):
+            return [None] * len(face_embeddings)
+
+        query_matrix = np.vstack([
+            np.asarray(embedding, dtype=np.float32).reshape(-1)
+            for embedding in face_embeddings
+        ])
+        if query_matrix.shape[1] != 512 or not np.all(np.isfinite(query_matrix)):
+            raise ValueError("face embeddings must be finite 512-dimensional vectors")
+
+        norms = np.linalg.norm(query_matrix, axis=1, keepdims=True)
+        if np.any(~np.isfinite(norms)) or np.any(norms <= 0.0):
+            raise ValueError("face embeddings must have a positive finite norm")
+        query_matrix = query_matrix / norms
+
+        similarities = query_matrix @ star_matrix.T
+        best_indexes = np.argmax(similarities, axis=1)
+        results: list[Optional[Dict[str, Any]]] = []
+        for face_row, star_row in enumerate(best_indexes):
+            similarity = float(np.clip(similarities[face_row, star_row], -1.0, 1.0))
+            if similarity < float(min_similarity):
+                results.append(None)
+                continue
+            results.append({
+                "starId": star_ids[int(star_row)],
+                "similarity": similarity,
+            })
+        return results
 
     def find_most_similar_star(
         self,

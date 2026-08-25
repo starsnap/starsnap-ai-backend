@@ -1,6 +1,6 @@
 # StarSnap AI Backend
 
-Flask 기반 얼굴 임베딩 백엔드입니다. 업로드한 이미지에서 얼굴 임베딩을 추출하고 `star.face_image_vector`에 저장합니다.
+Flask 기반 얼굴 임베딩 백엔드입니다. 업로드한 이미지에서 얼굴 임베딩을 추출하고 `star.face_image_vector`에 저장하며, 스냅 사진의 다중 얼굴 벡터화와 스타 사전 식별을 위한 내부 API를 제공합니다.
 
 ## 언어와 기술 스택
 
@@ -65,6 +65,8 @@ starsnap-ai-backend/
 
 - `/api/enroll`에서 얼굴 임베딩을 추출
 - 추출된 벡터를 `star.face_image_vector (vector(512))`에 저장
+- `/api/internal/v1/face-analysis`에서 얼굴을 최대 10개까지 안정적인 순서로 추출하고 512차원 L2-normalized 벡터와 임계값을 통과한 스타 매칭을 반환
+- 내부 분석 요청의 등록 스타 벡터는 한 번만 조회하고 모든 얼굴을 NumPy 행렬 연산으로 비교
 - 별도 `images` 테이블 저장은 사용하지 않음
 - 기존 `image.py`, `person.py` 모델은 `app/models/legacy/`로 이동
 
@@ -92,7 +94,48 @@ starsnap-ai-backend/
 - `401 Token expired`: 만료 토큰
 - `403 Admin only`: 인증은 성공했지만 권한 부족
 
+내부 얼굴 분석 API는 사용자 JWT와 분리된 `AI_INTERNAL_TOKEN`을 사용합니다. 값은 직접 환경변수 또는 `AI_INTERNAL_TOKEN_FILE`의 secret 파일에서 로드할 수 있습니다. 메인 백엔드는 `Authorization: Bearer <resolved-token>`을 전송해야 하며, 이 API의 이미지·embedding 응답 본문은 access log로 전달되지 않습니다.
+
 ## API
+
+### `POST /api/internal/v1/face-analysis`
+
+메인 백엔드 전용 다중 얼굴 분석 API입니다.
+
+- Header: `Authorization: Bearer <AI_INTERNAL_TOKEN>`
+- Header: `X-Request-Id` (optional, 없으면 UUID 생성)
+- form-data: `file` (required), `maxFaces` (optional, 1부터 설정 상한까지)
+- 얼굴 정렬: bbox 면적 내림차순, 이후 좌표 순
+- 얼굴 없음: `200` + `faces: []`
+- `bestMatch`: `MATCH_MIN_SIMILARITY` 이상인 스타만 반환하며 나머지는 `null`
+
+```json
+{
+  "schemaVersion": "1",
+  "requestId": "snap-request-123",
+  "image": {"width": 1920, "height": 1080},
+  "model": {
+    "name": "buffalo_l",
+    "version": "insightface-0.7.3",
+    "embeddingDimension": 512,
+    "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]
+  },
+  "detectedFaceCount": 1,
+  "processedFaceCount": 1,
+  "truncated": false,
+  "faces": [
+    {
+      "faceIndex": 0,
+      "bbox": [120, 80, 220, 220],
+      "detectionConfidence": 0.99,
+      "embedding": [0.0123, -0.0456],
+      "bestMatch": {"starId": "star_001", "similarity": 0.92}
+    }
+  ]
+}
+```
+
+전체 오류·계약은 [API_SPEC.md](API_SPEC.md)를 참고하세요.
 
 ### `POST /api/enroll`
 이미지를 업로드해 `star.face_image_vector`를 갱신합니다.
@@ -314,8 +357,32 @@ ARCFACE_MAX_IMAGE_DIM=1280
 # /api/match/star 최소 유사도 임계값
 MATCH_MIN_SIMILARITY=0.45
 
+# 메인 백엔드 -> AI 백엔드 내부 API 전용 공유 토큰 (필수)
+AI_INTERNAL_TOKEN=
+# 파일 기반 secret을 사용할 때 설정 (AI_INTERNAL_TOKEN이 비어 있을 때만 사용)
+AI_INTERNAL_TOKEN_FILE=
+
+# 내부 얼굴 분석 제한/모델 계약 메타데이터 (선택, 아래는 기본값)
+AI_FACE_ANALYSIS_MAX_IMAGE_BYTES=15728640
+AI_FACE_ANALYSIS_MAX_PIXELS=60000000
+AI_FACE_ANALYSIS_MAX_FACES=10
+AI_FACE_ANALYSIS_MATCH_STARS=true
+AI_FACE_MODEL_VERSION=insightface-0.7.3
+
 # JWT Access Token 검증 시크릿 (starsnap-backend와 동일해야 함)
 JWT_ACCESS_SECRET=
+```
+
+`AI_INTERNAL_TOKEN`은 사용자 JWT secret과 다른 충분히 긴 임의 값으로 설정하고 로그나 저장소에 커밋하지 않습니다. Docker/Swarm secret을 사용할 때는 `AI_INTERNAL_TOKEN`을 비우고 `AI_INTERNAL_TOKEN_FILE`에 마운트된 파일 경로를 지정할 수 있습니다. 두 값이 모두 있으면 직접 환경변수가 우선이며, 파일 값은 앞뒤 공백과 줄바꿈을 제거해 사용합니다. 어느 쪽도 없거나 파일이 비어 있으면 앱이 설정 로드 단계에서 즉시 실패합니다.
+
+`AI_FACE_ANALYSIS_MATCH_STARS=false`로 실행하면 내부 얼굴 분석 API는 Star DB 인덱스를 읽지 않습니다. 얼굴 임베딩은 동일하게 반환하지만 모든 `bestMatch`는 `null`이므로, 운영 DB를 보유한 메인 백엔드가 벡터 매칭을 담당할 수 있습니다. 기본값 `true`는 기존 AI 백엔드의 직접 매칭 동작을 유지합니다.
+
+## 단위 테스트
+
+실제 얼굴 모델 없이 fake detector/service로 내부 계약을 검증합니다.
+
+```bash
+python -m unittest test_embedding_service_unit test_face_analysis_route_unit test_image_utils_unit -v
 ```
 
 `ARCFACE_PROVIDERS` 기본값은 GPU 우선 + CPU 폴백입니다.

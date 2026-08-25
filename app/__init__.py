@@ -5,7 +5,6 @@ from flask import Flask, g, request as flask_request
 from db import db
 from config import Config
 from app.models import Star
-from app.routes import enroll_bp
 from app.utils.access_log_sender import send_access_log
 from urllib.parse import urlparse, unquote
 from datetime import datetime, timezone
@@ -63,6 +62,13 @@ def create_app(config_class=Config):
     # 설정 로드
     app.config.from_object(config_class)
 
+    # 모델 초기화는 애플리케이션 생성 시점까지 지연해 route 단위 테스트에서
+    # 실제 InsightFace 모델을 올리지 않고 fake 서비스를 주입할 수 있게 한다.
+    from app.routes.enroll import embedding_service, enroll_bp
+    from app.routes.face_analysis import face_analysis_bp
+
+    app.extensions["embedding_service"] = embedding_service
+
     # 실제 DB 연결 대상을 시작 시 1회 로그로 출력
     _log_db_target(app)
     
@@ -79,6 +85,7 @@ def create_app(config_class=Config):
     
     # 블루프린트 등록
     app.register_blueprint(enroll_bp)
+    app.register_blueprint(face_analysis_bp)
 
     # -----------------------------------------------------------------------
     # Access Log 전송 훅
@@ -110,7 +117,10 @@ def create_app(config_class=Config):
             req_headers = "\n".join(
                 f"{k}: {v}" for k, v in flask_request.headers.items()
             )
-            if (flask_request.content_type or "").lower().startswith("multipart/form-data"):
+            omit_bodies = bool(getattr(g, "omit_access_log_bodies", False))
+            if omit_bodies:
+                req_body = "[internal face-analysis body omitted]"
+            elif (flask_request.content_type or "").lower().startswith("multipart/form-data"):
                 req_body = "\n".join(
                     f"{k}={v}" for k, v in flask_request.form.items()
                 ) or "[multipart/form-data omitted]"
@@ -119,7 +129,9 @@ def create_app(config_class=Config):
 
             # 응답 정보 수집 (바이너리 응답은 빈 문자열로 처리)
             content_type = response.content_type or ""
-            if "text" in content_type or "json" in content_type or "xml" in content_type:
+            if omit_bodies:
+                resp_body = "[internal face-analysis body omitted]"
+            elif "text" in content_type or "json" in content_type or "xml" in content_type:
                 resp_body = response.get_data(as_text=True) or ""
             else:
                 resp_body = ""

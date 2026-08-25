@@ -30,6 +30,17 @@ embedding_service = EmbeddingService(
 )
 
 
+def _read_bounded_upload(upload):
+    """Read an authenticated diagnostic upload without unbounded memory use."""
+    max_bytes = int(Config.AI_FACE_ANALYSIS_MAX_IMAGE_BYTES)
+    content = upload.stream.read(max_bytes + 1)
+    if not content:
+        return None, (jsonify({"error": "file is empty"}), 400)
+    if len(content) > max_bytes:
+        return None, (jsonify({"error": f"file exceeds {max_bytes} bytes"}), 413)
+    return content, None
+
+
 def _uses_presigned_upload_api(url: str) -> bool:
     """Whether PHOTO_API_URL targets the main backend presign endpoint."""
     try:
@@ -75,9 +86,9 @@ def enroll():
             return jsonify({"error": "filename is empty"}), 400
         original_filename = file.filename or "upload.bin"
         original_content_type = file.mimetype
-        content = file.read()
-        if not content:
-            return jsonify({"error": "file is empty"}), 400
+        content, upload_error = _read_bounded_upload(file)
+        if upload_error is not None:
+            return upload_error
     else:
         original_filename = "upload.bin"
         original_content_type = None
@@ -97,6 +108,9 @@ def enroll():
                     metadata_fields[key] = value
             else:
                 metadata_fields[key] = value
+    if file is not None:
+        metadata_fields["contentType"] = original_content_type
+        metadata_fields["fileSize"] = len(content)
 
     access_token = getattr(g, "access_token", "")
     forwarded_cookie = (
@@ -405,6 +419,8 @@ def enroll():
 
 
 @enroll_bp.route("/embedding/star/<string:star_id>", methods=["GET"])
+@require_jwt
+@require_admin
 def get_embedding(star_id):
     """
     Star ID로 임베딩 벡터 조회 (디버그용)
@@ -428,6 +444,8 @@ def get_embedding(star_id):
         "embedding_preview": vec[:10].tolist()
     }), 200
 @enroll_bp.route("/match/star", methods=["POST"])
+@require_jwt
+@require_admin
 def match_star():
     """업로드한 얼굴과 가장 유사한 Star 정보를 반환한다.
 
@@ -440,9 +458,9 @@ def match_star():
     if file.filename == '':
         return jsonify({"error": "filename is empty"}), 400
 
-    content = file.read()
-    if not content:
-        return jsonify({"error": "file is empty"}), 400
+    content, upload_error = _read_bounded_upload(file)
+    if upload_error is not None:
+        return upload_error
 
     info = embedding_service.extract_face_embedding(content)
     if info is None:
@@ -476,6 +494,8 @@ def match_star():
         }
     }), 200
 @enroll_bp.route("/test/largest-face", methods=["POST"])
+@require_jwt
+@require_admin
 def test_largest_face():
     """업로드 이미지에서 가장 큰 얼굴 1개를 잘라 파일로 반환한다."""
     if 'file' not in request.files:
@@ -485,9 +505,9 @@ def test_largest_face():
     if file.filename == '':
         return jsonify({"error": "filename is empty"}), 400
 
-    content = file.read()
-    if not content:
-        return jsonify({"error": "file is empty"}), 400
+    content, upload_error = _read_bounded_upload(file)
+    if upload_error is not None:
+        return upload_error
 
     result = embedding_service.extract_largest_face_for_test(content)
     if result is None:
@@ -507,6 +527,8 @@ def test_largest_face():
 
 
 @enroll_bp.route("/test/face-vector", methods=["POST"])
+@require_jwt
+@require_admin
 def test_face_vector():
     """업로드한 인물 사진에서 얼굴 임베딩 벡터를 추출해 JSON으로 반환한다.
 
@@ -527,9 +549,9 @@ def test_face_vector():
     if file.filename == '':
         return jsonify({"error": "filename is empty"}), 400
 
-    content = file.read()
-    if not content:
-        return jsonify({"error": "file is empty"}), 400
+    content, upload_error = _read_bounded_upload(file)
+    if upload_error is not None:
+        return upload_error
 
     max_dim_raw = request.form.get("max_dim")
     try:
