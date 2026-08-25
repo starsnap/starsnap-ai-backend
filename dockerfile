@@ -1,6 +1,9 @@
 # StarSnap AI Backend Dockerfile (GPU)
 # CUDA runtime + cuDNN 포함 이미지 사용
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# CUDA 12.8 + cuDNN 9.8 supports Blackwell GPUs (for example RTX 5080,
+# compute capability 12.0). Pin the amd64 manifest so production rebuilds use
+# the runtime that passed GPU inference validation.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04@sha256:59e0e4376a0f16d10b03d3a14344b80a866a1674cb4948cb318291387ac05010
 
 # 작업 디렉토리 설정
 WORKDIR /app
@@ -44,8 +47,8 @@ COPY . .
 # 포트 노출
 EXPOSE 8000
 
-# 헬스 체크 추가 (간격을 30분으로 변경)
-HEALTHCHECK --interval=30m --timeout=10s --start-period=1m --retries=3 \
+# 배포 롤아웃이 장애를 빠르게 감지할 수 있도록 짧은 주기로 확인한다.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=2m --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
 # 애플리케이션 실행

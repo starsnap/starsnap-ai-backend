@@ -16,7 +16,7 @@ Flask 기반 얼굴 임베딩 백엔드입니다. 업로드한 이미지에서 �
 | 수치 처리 | NumPy | 2.2.6 |
 | 영속성 | SQLAlchemy / psycopg2 | 2.0.43 / 2.9.10 |
 | 벡터 | pgvector | 0.3.6 |
-| GPU 이미지 | CUDA cuDNN runtime / Ubuntu | 12.4.1 / 22.04 |
+| GPU 이미지 | CUDA cuDNN runtime / Ubuntu | 12.8.1 / 22.04 |
 
 ## 시스템 아키텍처
 
@@ -216,7 +216,7 @@ curl -X PUT "<presignedUrl>" \
 
 ### `GET /api/health`
 헬스 체크 엔드포인트입니다.
-- Docker 이미지 기준으로 컨테이너 내부 `HEALTHCHECK`가 `/api/health`를 **30분마다** 호출합니다.
+- Docker 이미지 기준으로 컨테이너 내부 `HEALTHCHECK`가 `/api/health`를 **30초마다** 호출합니다.
 
 ### `POST /api/match/star`
 업로드한 사진의 얼굴 임베딩을 추출하고, 등록된 `star.face_image_vector`와 비교해 가장 유사한 스타 1명을 반환합니다.
@@ -417,7 +417,7 @@ docker run --rm --gpus all -p 8000:8000 --env-file .env starsnap-ai-backend
 ```
 
 헬스 체크 기본값(현재 `dockerfile` 기준):
-- `HEALTHCHECK --interval=30m --timeout=10s --start-period=1m --retries=3`
+- `HEALTHCHECK --interval=30s --timeout=10s --start-period=2m --retries=3`
 
 실행 후 로그에서 아래처럼 provider 적용 상태를 확인하세요.
 - 기대값: `Applied providers: ['CUDAExecutionProvider', ...]`
