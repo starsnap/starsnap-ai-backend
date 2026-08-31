@@ -75,6 +75,7 @@ starsnap-ai-backend/
 - `POST /api/enroll`는 JWT 인증이 필요합니다.
 - `POST /api/enroll`는 `ADMIN` 권한만 허용합니다.
 - 로그인 시 발급된 HttpOnly `access-token` 쿠키가 필요하며, Bearer 헤더는 인증에 사용하지 않습니다.
+- 상태 변경 요청 전 `GET /api/csrf-token`에서 토큰을 받은 뒤 `X-CSRFToken` 헤더로 전달해야 합니다.
 
 토큰 검증 규칙:
 - 알고리즘: `HS256`

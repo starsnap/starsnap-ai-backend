@@ -29,7 +29,12 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     xvfb \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 starsnap \
+    && useradd --uid 10001 --gid 10001 --create-home \
+      --home-dir /home/starsnap --shell /usr/sbin/nologin starsnap \
+    && mkdir -p /home/starsnap/.insightface \
+    && chown -R 10001:10001 /home/starsnap
 
 # Python 패키지 의존성 파일 복사 및 설치
 COPY requirements.txt .
@@ -40,9 +45,16 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
     python -m pip install --no-cache-dir --upgrade onnxruntime-gpu==1.23.2 && \
     python -c "import onnxruntime as ort; print('ONNX Runtime providers:', ort.get_available_providers())"
 
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV HOME=/home/starsnap
+ENV XDG_CACHE_HOME=/tmp/.cache
+ENV MPLCONFIGDIR=/tmp/.cache/matplotlib
 
-# 소스 코드 복사 (requirements 설치 후에 해야 캐시 효율적)
-COPY . .
+# 실행에 필요한 소스만 복사한다. 테스트·문서·로컬 설정은 이미지에 넣지 않는다.
+COPY app.py config.py db.py ./
+COPY app ./app
+
+USER 10001:10001
 
 # 포트 노출
 EXPOSE 8000

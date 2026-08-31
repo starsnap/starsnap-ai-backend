@@ -4,6 +4,10 @@
 .idea
 .venv
 __pycache__
+.pytest_cache
+graphify-out
+test_*.py
+docs
 *.pyc
 *.log
 test.py

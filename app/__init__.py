@@ -1,16 +1,21 @@
 """
 Flask 애플리케이션 팩토리
 """
-from flask import Flask, g, request as flask_request
+from flask import Flask, g, jsonify, request as flask_request
+from flask_wtf.csrf import CSRFError, CSRFProtect, generate_csrf
 from db import db
 from config import Config
 from app.models import Star
 from app.utils.access_log_sender import send_access_log
+from app.utils.jwt_utils import ACCESS_TOKEN_COOKIE_NAME
 from urllib.parse import urlparse, unquote
 from datetime import datetime, timezone
 import logging
 import sys
 import time
+
+
+csrf = CSRFProtect()
 
 
 def _configure_app_logger(app: Flask) -> None:
@@ -61,6 +66,8 @@ def create_app(config_class=Config):
 
     # 설정 로드
     app.config.from_object(config_class)
+    # 전역 자동 검사는 Bearer/진단 POST까지 막으므로 아래 쿠키 경계에서만 호출한다.
+    app.config["WTF_CSRF_CHECK_DEFAULT"] = False
 
     # 모델 초기화는 애플리케이션 생성 시점까지 지연해 route 단위 테스트에서
     # 실제 InsightFace 모델을 올리지 않고 fake 서비스를 주입할 수 있게 한다.
@@ -87,6 +94,16 @@ def create_app(config_class=Config):
     app.register_blueprint(enroll_bp)
     app.register_blueprint(face_analysis_bp)
 
+    @app.errorhandler(CSRFError)
+    def _handle_csrf_error(_error):
+        return jsonify({"error": "CSRF token missing or invalid"}), 400
+
+    @app.get("/api/csrf-token")
+    def csrf_token():
+        response = jsonify({"csrfToken": generate_csrf()})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     # -----------------------------------------------------------------------
     # Access Log 전송 훅
     # -----------------------------------------------------------------------
@@ -100,6 +117,17 @@ def create_app(config_class=Config):
             # get_data()를 여기서 한 번 호출해 두면 Flask 내부에 캐시되어
             # 이후 뷰 함수에서도 정상적으로 읽을 수 있다.
             flask_request.get_data()
+
+    csrf.init_app(app)
+
+    @app.before_request
+    def _protect_cookie_authenticated_write():
+        """브라우저 쿠키가 권한을 부여하는 상태 변경 요청만 CSRF 검증한다."""
+        if (
+            flask_request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and flask_request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
+        ):
+            csrf.protect()
 
     @app.after_request
     def _after_access_log(response):

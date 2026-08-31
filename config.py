@@ -159,6 +159,24 @@ class Config:
     # JWT
     JWT_ACCESS_SECRET = _require_env("JWT_ACCESS_SECRET")
 
+    # 브라우저 쿠키 인증 API의 CSRF 보호. 별도 키가 없으면 기존 JWT secret을
+    # 사용해 배포 호환성을 유지하되, 운영에서는 독립 키 사용을 권장한다.
+    CSRF_SECRET_KEY = (
+        os.getenv("CSRF_SECRET_KEY", JWT_ACCESS_SECRET).strip()
+        or JWT_ACCESS_SECRET
+    )
+    SECRET_KEY = CSRF_SECRET_KEY
+    WTF_CSRF_SECRET_KEY = CSRF_SECRET_KEY
+    WTF_CSRF_TIME_LIMIT = 3600
+    WTF_CSRF_CHECK_DEFAULT = False
+    SESSION_COOKIE_NAME = "starsnap-ai-csrf"
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = "Lax"
+    SESSION_COOKIE_SECURE = _bool_env_with_default(
+        "SESSION_COOKIE_SECURE",
+        not DEBUG,
+    )
+
     # 메인 백엔드 -> AI 백엔드 전용 내부 API 인증/제한
     AI_INTERNAL_TOKEN = _require_env_or_file(
         "AI_INTERNAL_TOKEN",

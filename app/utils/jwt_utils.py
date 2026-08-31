@@ -32,20 +32,18 @@ def _decode_access_token(token: str) -> dict:
         jwt.InvalidTokenError   : 서명/형식 오류
         ValueError              : JWT 헤더가 "access"가 아닐 때
     """
-    # 1) 헤더 타입 확인 (JWT 키만 허용)
-    header = jwt.get_unverified_header(token)
-    jwt_value = header.get("JWT")
-    if jwt_value != "access":
-        raise ValueError(f"Invalid token type: JWT={jwt_value}")
-
-    # 2) 서명 + 만료 검증
-    payload = jwt.decode(
+    # 서명과 만료를 먼저 검증한 뒤 동일 결과에서 헤더/클레임을 읽는다.
+    decoded = jwt.decode_complete(
         token,
         Config.JWT_ACCESS_SECRET,
         algorithms=["HS256"],
         options={"verify_typ": False},  # typ="access"는 비표준이므로 PyJWT 기본 검사 스킵
     )
-    return payload
+    header = decoded["header"]
+    jwt_value = header.get("JWT")
+    if jwt_value != "access":
+        raise ValueError(f"Invalid token type: JWT={jwt_value}")
+    return decoded["payload"]
 
 
 def get_current_user() -> dict | None:
