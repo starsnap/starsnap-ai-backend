@@ -38,7 +38,7 @@ AI 서버는 별도 데이터 저장소를 두지 않고 메인 서비스의 `st
 ## 프로젝트 구조
 
 ```
-starsnap-ai-backend/
+starsnap-ai-server/
 ├── app.py
 ├── config.py
 ├── db.py
@@ -328,8 +328,10 @@ Postman 설정:
 1) starsnap-backend에서 Access Token 발급
 
 2) 임베딩 등록 / presign 처리
+- `GET /api/csrf-token` 응답의 `csrfToken`을 같은 쿠키 세션에서 준비
 - `POST /api/enroll`
 - Cookie: `access-token=<access_token>` (로그인된 클라이언트에서는 자동 첨부)
+- Header: `X-CSRFToken: <csrfToken>`
 - form-data: `star_id`, (`file` 선택), (`aiState`, `dateTaken`, `source` 선택)
 
 3) 유사도 검색
@@ -372,6 +374,11 @@ AI_FACE_MODEL_VERSION=insightface-0.7.3
 
 # JWT Access Token 검증 시크릿 (starsnap-backend와 동일해야 함)
 JWT_ACCESS_SECRET=
+
+# 브라우저 쿠키 인증 API의 CSRF 서명 키 (선택, 미설정 시 JWT_ACCESS_SECRET 사용)
+CSRF_SECRET_KEY=
+# 운영 HTTPS에서는 true, 로컬 HTTP 디버그에서만 false
+SESSION_COOKIE_SECURE=true
 ```
 
 `AI_INTERNAL_TOKEN`은 사용자 JWT secret과 다른 충분히 긴 임의 값으로 설정하고 로그나 저장소에 커밋하지 않습니다. Docker/Swarm secret을 사용할 때는 `AI_INTERNAL_TOKEN`을 비우고 `AI_INTERNAL_TOKEN_FILE`에 마운트된 파일 경로를 지정할 수 있습니다. 두 값이 모두 있으면 직접 환경변수가 우선이며, 파일 값은 앞뒤 공백과 줄바꿈을 제거해 사용합니다. 어느 쪽도 없거나 파일이 비어 있으면 앱이 설정 로드 단계에서 즉시 실패합니다.

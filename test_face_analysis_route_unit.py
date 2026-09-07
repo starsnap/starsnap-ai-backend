@@ -309,6 +309,62 @@ class FaceAnalysisRouteTest(unittest.TestCase):
         self.assertEqual("[internal face-analysis body omitted]", forwarded["response_body"])
         self.assertNotIn("embedding", forwarded["response_body"])
 
+    def test_create_app_stateless_mode_skips_database_initialization(self):
+        service = _FakeEmbeddingService(_analysis([]))
+        fake_enroll_module = types.ModuleType("app.routes.enroll")
+        fake_enroll_module.embedding_service = service
+        fake_enroll_module.enroll_bp = Blueprint("fake_stateless_enroll", __name__)
+
+        class TestConfig:
+            TESTING = True
+            AI_DATABASE_ENABLED = False
+            AI_FACE_ANALYSIS_MATCH_STARS = False
+            ACCESS_LOG_ENABLED = False
+            AI_INTERNAL_TOKEN = "internal-secret"
+            AI_FACE_ANALYSIS_MAX_IMAGE_BYTES = 1024
+            AI_FACE_ANALYSIS_MAX_FACES = 10
+            AI_FACE_MODEL_VERSION = "insightface-0.7.3"
+            ARCFACE_MODEL_NAME = "buffalo_l"
+            MATCH_MIN_SIMILARITY = 0.45
+
+        with patch.dict(sys.modules, {"app.routes.enroll": fake_enroll_module}):
+            with patch("app.db.init_app") as init_app, patch("app.db.create_all") as create_all:
+                client = create_app(TestConfig).test_client()
+
+        self.assertEqual(200, client.get("/api/health").status_code)
+        init_app.assert_not_called()
+        create_all.assert_not_called()
+
+    def test_database_disabled_forces_face_matching_off(self):
+        service = _FakeEmbeddingService(_analysis([
+            {"face_index": 0, "bbox": [1, 2, 3, 4], "confidence": 0.9, "embedding": _embedding(0)},
+        ]))
+        app = Flask(__name__)
+        app.config.update(
+            TESTING=True,
+            AI_DATABASE_ENABLED=False,
+            AI_FACE_ANALYSIS_MATCH_STARS=True,
+            AI_INTERNAL_TOKEN="internal-secret",
+            AI_FACE_ANALYSIS_MAX_IMAGE_BYTES=1024,
+            AI_FACE_ANALYSIS_MAX_FACES=10,
+            AI_FACE_MODEL_VERSION="insightface-0.7.3",
+            ARCFACE_MODEL_NAME="buffalo_l",
+            MATCH_MIN_SIMILARITY=0.45,
+        )
+        app.extensions["embedding_service"] = service
+        app.register_blueprint(face_analysis_bp)
+
+        response = app.test_client().post(
+            "/api/internal/v1/face-analysis",
+            data={"file": (io.BytesIO(b"image"), "face.jpg")},
+            headers={"Authorization": "Bearer internal-secret"},
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(0, service.index_calls)
+        self.assertEqual(0, service.match_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

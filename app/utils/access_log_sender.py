@@ -45,6 +45,10 @@ _SENSITIVE_FIELD_NAMES = {
     "xamzcredential",
     "xamzsignature",
     "xamzsecuritytoken",
+    "apikey",
+    "session",
+    "sessionid",
+    "otp",
 }
 _FORM_SECRET_RE = re.compile(
     r"(?i)((?:^|[&\s])(?:password|passcode|access[_-]?token|refresh[_-]?token|"
@@ -170,6 +174,7 @@ def redact_headers(raw: str) -> str:
 def send_access_log(
     *,
     url: str,
+    secret: str,
     service_name: str,
     path: str,
     method: str,
@@ -185,9 +190,12 @@ def send_access_log(
     query_params: str,
 ) -> None:
     """백그라운드 스레드에서 액세스 로그를 전송한다. 절대 예외를 올리지 않는다."""
+    if not url or not secret:
+        return
     _executor.submit(
         _do_send,
         url=url,
+        secret=secret,
         service_name=service_name,
         path=path,
         method=method,
@@ -196,10 +204,12 @@ def send_access_log(
         response_time_ms=response_time_ms,
         requested_at=requested_at,
         user_agent=user_agent,
-        request_headers=redact_headers(request_headers),
-        request_body=redact_body(request_body),
-        response_headers=redact_headers(response_headers),
-        response_body=redact_body(response_body),
+        # Hub only needs request metadata. Never persist headers or bodies here:
+        # AI responses can contain biometric embeddings and other private data.
+        request_headers="",
+        request_body="",
+        response_headers="",
+        response_body="",
         query_params=redact_query_params(query_params),
     )
 
@@ -207,6 +217,7 @@ def send_access_log(
 def _do_send(
     *,
     url: str,
+    secret: str,
     service_name: str,
     path: str,
     method: str,
@@ -237,10 +248,12 @@ def _do_send(
         "responseTimeMs": max(0.0, round(float(response_time_ms), 3)),
         # Note: only responseTimeMs (float) is sent. Microsecond field was removed.
         "requestedAt": _fmt_dt(requested_at),
-        "requestHeaders": _truncate(request_headers),
-        "requestBody": _truncate(request_body),
-        "responseHeaders": _truncate(response_headers),
-        "responseBody": _truncate(response_body),
+        # Keep this invariant in the worker as well so direct calls cannot
+        # accidentally forward biometric or credential material.
+        "requestHeaders": "",
+        "requestBody": "",
+        "responseHeaders": "",
+        "responseBody": "",
     }
 
     if user_agent is not None:
@@ -261,6 +274,7 @@ def _do_send(
         req = urllib_request.Request(url, data=body, method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("User-Agent", "starsnap-access-log-sender/1.0")
+        req.add_header("X-Hub-Log-Secret", secret)
         with urllib_request.urlopen(req, timeout=3.0) as resp:
             resp.read()  # 응답 소비 (커넥션 유지를 막기 위해)
     except urllib_error.HTTPError as e:

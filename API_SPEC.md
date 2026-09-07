@@ -1,6 +1,6 @@
 # StarSnap AI 백엔드 API 명세
 
-> 서버 루트: `starsnap-main/starsnap-ai-backend`
+> 서버 루트: `starsnap-main/starsnap-ai-server`
 > Server origin: `http://localhost:8000`
 > 엔드포인트: 7개
 
@@ -18,7 +18,7 @@
 
 등록되지 않은 path/method의 `404`, `405`와 잡히지 않은 `500`은 Flask 기본 HTML 응답일 수 있다. 모든 요청은 access-log 설정이 활성화된 경우 Hub `POST /api/server-logs`로 비동기 전송된다. multipart의 파일 내용은 로그에서 제외되며, 비밀번호·토큰·서명 query와 `Authorization`/`Cookie`/`Set-Cookie` 등 민감 header는 `[REDACTED]`로 치환된다. 내부 얼굴 분석 경로는 벡터 유출을 막기 위해 요청·응답 본문 전체를 고정된 생략 문구로 대체한다.
 
-소스: [app.py](../../starsnap-main/starsnap-ai-backend/app.py), [app/__init__.py](../../starsnap-main/starsnap-ai-backend/app/__init__.py), [enroll.py](../../starsnap-main/starsnap-ai-backend/app/routes/enroll.py), [face_analysis.py](../../starsnap-main/starsnap-ai-backend/app/routes/face_analysis.py)
+소스: [app.py](../../starsnap-main/starsnap-ai-server/app.py), [app/__init__.py](../../starsnap-main/starsnap-ai-server/app/__init__.py), [enroll.py](../../starsnap-main/starsnap-ai-server/app/routes/enroll.py), [face_analysis.py](../../starsnap-main/starsnap-ai-server/app/routes/face_analysis.py)
 
 ## 2. 엔드포인트 요약
 
@@ -57,7 +57,7 @@ Cookie: access-token=<access-token>
 
 `POST /api/internal/v1/face-analysis`는 사용자 JWT와 분리된 서버 간 토큰을 사용한다. 토큰은 `AI_INTERNAL_TOKEN` 또는 `AI_INTERNAL_TOKEN_FILE`에서 로드하며 `Authorization: Bearer <resolved-token>`으로 전달한다. 토큰은 constant-time 비교되고, 누락·불일치는 `401` JSON과 `WWW-Authenticate: Bearer`를 반환한다. 토큰 값은 access log에서 제거된다.
 
-근거: [jwt_utils.py](../../starsnap-main/starsnap-ai-backend/app/utils/jwt_utils.py)
+근거: [jwt_utils.py](../../starsnap-main/starsnap-ai-server/app/utils/jwt_utils.py)
 
 ## 4. 상세 API
 
@@ -322,4 +322,4 @@ Request: `multipart/form-data`
 5. 내부 얼굴 분석은 `test_embedding_service_unit.py`, `test_face_analysis_route_unit.py`, `test_image_utils_unit.py`에서 모델을 mock한 자동화 테스트를 제공한다. 기존 루트 `test.py`는 API test가 아니라 로컬 이미지 비교 script다.
 6. 일부 기본 오류는 JSON이 아니라 Flask HTML일 수 있다.
 
-핵심 구현 근거: [enroll.py](../../starsnap-main/starsnap-ai-backend/app/routes/enroll.py), [face_analysis.py](../../starsnap-main/starsnap-ai-backend/app/routes/face_analysis.py), [embedding_service.py](../../starsnap-main/starsnap-ai-backend/app/services/embedding_service.py), [http_forward.py](../../starsnap-main/starsnap-ai-backend/app/utils/http_forward.py), [config.py](../../starsnap-main/starsnap-ai-backend/config.py).
+핵심 구현 근거: [enroll.py](../../starsnap-main/starsnap-ai-server/app/routes/enroll.py), [face_analysis.py](../../starsnap-main/starsnap-ai-server/app/routes/face_analysis.py), [embedding_service.py](../../starsnap-main/starsnap-ai-server/app/services/embedding_service.py), [http_forward.py](../../starsnap-main/starsnap-ai-server/app/utils/http_forward.py), [config.py](../../starsnap-main/starsnap-ai-server/config.py).

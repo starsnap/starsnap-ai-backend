@@ -76,19 +76,24 @@ def create_app(config_class=Config):
 
     app.extensions["embedding_service"] = embedding_service
 
-    # 실제 DB 연결 대상을 시작 시 1회 로그로 출력
-    _log_db_target(app)
-    
-    # 데이터베이스 초기화
-    db.init_app(app)
-    
-    # 애플리케이션 컨텍스트에서 테이블 생성 (DB 연결이 가능한 경우에만)
-    try:
-        with app.app_context():
-            db.create_all()
-    except Exception as e:
-        app.logger.warning("Warning: Could not create database tables: %s", e)
-        app.logger.warning("Make sure your database is running and configured correctly.")
+    if database_enabled:
+        # 실제 DB 연결 대상을 시작 시 1회 로그로 출력
+        _log_db_target(app)
+
+        # 데이터베이스 초기화
+        db.init_app(app)
+
+        # 애플리케이션 컨텍스트에서 테이블 생성 (DB 연결이 가능한 경우에만)
+        try:
+            with app.app_context():
+                db.create_all()
+        except Exception as e:
+            app.logger.warning("Warning: Could not create database tables: %s", e)
+            app.logger.warning("Make sure your database is running and configured correctly.")
+    else:
+        app.logger.info(
+            "AI database disabled; running stateless face-analysis mode"
+        )
     
     # 블루프린트 등록
     app.register_blueprint(enroll_bp)
@@ -170,6 +175,7 @@ def create_app(config_class=Config):
 
             send_access_log(
                 url=app.config.get("ACCESS_LOG_URL"),
+                secret=app.config.get("ACCESS_LOG_SECRET", ""),
                 service_name=app.config.get("ACCESS_LOG_SERVICE_NAME", "starsnap-ai-backend"),
                 path=flask_request.path,
                 method=flask_request.method,

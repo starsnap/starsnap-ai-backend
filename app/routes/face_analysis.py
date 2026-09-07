@@ -113,7 +113,7 @@ def analyze_faces():
 
         extracted_faces = analysis["faces"]
         matches: list[dict[str, Any] | None]
-        match_stars = bool(
+        match_stars = bool(current_app.config.get("AI_DATABASE_ENABLED", True)) and bool(
             current_app.config.get("AI_FACE_ANALYSIS_MATCH_STARS", True)
         )
         if extracted_faces and match_stars:

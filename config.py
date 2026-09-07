@@ -133,18 +133,24 @@ def _int_env_with_default(key: str, default: int, minimum: int = 1) -> int:
     return value
 
 
-# DB 관련 필수 설정
-DB_USER = _require_env("DB_USER")
-DB_PASSWORD = _require_env("DB_PASSWORD")
-DB_HOST = _require_env("DB_HOST")
-DB_PORT = _require_env("DB_PORT")
-DB_NAME = _require_env("DB_NAME")
-DB_SCHEME = _require_env("DB_SCHEME")
-
-DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+# Stateless 얼굴 분석 모드에서는 운영 DB를 초기화하거나 연결하지 않는다.
+_DATABASE_ENABLED = _bool_env_with_default("AI_DATABASE_ENABLED", True)
+if _DATABASE_ENABLED:
+    DB_USER = _require_env("DB_USER")
+    DB_PASSWORD = _require_env("DB_PASSWORD")
+    DB_HOST = _require_env("DB_HOST")
+    DB_PORT = _require_env("DB_PORT")
+    DB_NAME = _require_env("DB_NAME")
+    DB_SCHEME = _require_env("DB_SCHEME")
+    DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+else:
+    # Flask-SQLAlchemy는 비활성 상태에서 초기화되지 않는다. 실수로 다시
+    # 초기화 코드가 추가되더라도 임시 DB로 조용히 우회하지 않도록 fail-closed 한다.
+    DATABASE_URI = None
 
 
 class Config:
+    AI_DATABASE_ENABLED = _DATABASE_ENABLED
     SQLALCHEMY_DATABASE_URI = DATABASE_URI
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     DEBUG = _require_bool_env("DEBUG")
@@ -211,3 +217,4 @@ class Config:
     ACCESS_LOG_ENABLED: bool = os.getenv("ACCESS_LOG_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
     ACCESS_LOG_URL: str = os.getenv("ACCESS_LOG_URL", "http://host.docker.internal:8081/api/server-logs")
     ACCESS_LOG_SERVICE_NAME: str = os.getenv("ACCESS_LOG_SERVICE_NAME", "starsnap-ai-backend")
+    ACCESS_LOG_SECRET: str = os.getenv("ACCESS_LOG_SECRET", "").strip()

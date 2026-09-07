@@ -1,7 +1,7 @@
 """
 등록(Enroll) 관련 라우트
 """
-from flask import Blueprint, request, jsonify, send_file, g
+from flask import Blueprint, current_app, request, jsonify, send_file, g
 import io
 import logging
 from app.utils.http_forward import forward_multipart_request, build_multipart_payload, forward_request
@@ -52,6 +52,16 @@ def _uses_presigned_upload_api(url: str) -> bool:
     return bool(parsed.scheme and parsed.netloc) and normalized_path.endswith("/api/file/photo")
 
 
+def _database_disabled_response():
+    """Return a stable response for legacy DB-backed routes in stateless mode."""
+    if current_app.config.get("AI_DATABASE_ENABLED", True):
+        return None
+    return jsonify({
+        "error": "database-backed API is disabled",
+        "code": "database_disabled",
+    }), 503
+
+
 @enroll_bp.route("/enroll", methods=["POST"])
 @require_jwt
 @require_admin
@@ -71,6 +81,10 @@ def enroll():
         - star_id: 스타 ID
         - embedding_dim: 임베딩 차원
     """
+    disabled_response = _database_disabled_response()
+    if disabled_response is not None:
+        return disabled_response
+
     logger = logging.getLogger(__name__)
     t_total = time.monotonic()
     t_parse = t_total
@@ -358,6 +372,7 @@ def enroll():
         try:
             send_access_log(
                 url=Config.ACCESS_LOG_URL,
+                secret=Config.ACCESS_LOG_SECRET,
                 service_name=Config.ACCESS_LOG_SERVICE_NAME,
                 path=presign_path,
                 method="PUT",
@@ -433,6 +448,10 @@ def get_embedding(star_id):
         - embedding_dim: 임베딩 차원
         - embedding_preview: 임베딩의 첫 10개 값
     """
+    disabled_response = _database_disabled_response()
+    if disabled_response is not None:
+        return disabled_response
+
     vec = embedding_service.get_star_embedding_vector(star_id)
 
     if vec is None:
@@ -451,6 +470,10 @@ def match_star():
 
     임계값 미만이어도 비교 가능한 Star가 있으면 최고 유사도 결과를 반환한다.
     """
+    disabled_response = _database_disabled_response()
+    if disabled_response is not None:
+        return disabled_response
+
     if 'file' not in request.files:
         return jsonify({"error": "file required"}), 400
 
